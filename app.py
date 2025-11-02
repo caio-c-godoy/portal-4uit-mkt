@@ -1,5 +1,5 @@
 import os, base64, uuid, mimetypes, pathlib, secrets, smtplib
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from functools import wraps
 from email.message import EmailMessage
 from sqlalchemy import or_, asc, desc
@@ -9,6 +9,10 @@ from urllib.parse import urlencode, quote
 import json
 from flask import current_app
 
+# ===== Azure Blob (preferencial) =====
+from azure.identity import DefaultAzureCredential
+from azure.storage.blob import BlobServiceClient, BlobSasPermissions, generate_blob_sas
+
 from flask import (
     Flask, request, render_template, render_template_string,
     jsonify, send_from_directory, send_file, redirect, url_for,
@@ -16,7 +20,6 @@ from flask import (
 )
 from dotenv import load_dotenv
 from werkzeug.utils import secure_filename
-
 
 # DB / Models
 from extensions import db
@@ -47,6 +50,72 @@ except Exception:
 # Tokens (onboarding e set-password)
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
+# -------------------------------------------------
+# Azure Blob – configuração (opcional, com fallback local)
+# -------------------------------------------------
+ACCOUNT = os.environ.get("AZURE_STORAGE_ACCOUNT")  # ex.: "strgportal4uitmkt"
+CONTAINER = os.environ.get("AZURE_BLOB_CONTAINER", "uploads")
+
+blob_service = None
+container_client = None
+
+if ACCOUNT:
+    try:
+        cred = DefaultAzureCredential(exclude_shared_token_cache_credential=True)
+        blob_service = BlobServiceClient(
+            f"https://{ACCOUNT}.blob.core.windows.net", credential=cred
+        )
+        container_client = blob_service.get_container_client(CONTAINER)
+        try:
+            container_client.create_container()  # idempotente
+        except Exception:
+            pass
+    except Exception as e:
+        # Não falhar o app; seguimos com armazenamento local
+        blob_service = None
+        container_client = None
+
+
+def save_dataurl_png_to_blob(data_url: str, folder="signatures") -> str:
+    """
+    Salva dataURL PNG no Azure Blob (se configurado).
+    Retorna o blob_name (ex.: 'signatures/abc.png').
+    Lança exceção se blob não estiver disponível.
+    """
+    if not (blob_service and container_client):
+        raise RuntimeError("Azure Blob não configurado.")
+    if not data_url.startswith("data:image/png;base64,"):
+        raise ValueError("Assinatura inválida: formato não suportado")
+    b64 = data_url.split(",", 1)[1]
+    raw = base64.b64decode(b64)
+    blob_name = f"{folder}/{uuid.uuid4().hex}.png"
+    blob = container_client.get_blob_client(blob_name)
+    blob.upload_blob(raw, overwrite=True, content_type="image/png")
+    return blob_name
+
+
+def make_sas_url(blob_name: str, minutes: int = 15) -> str:
+    """
+    Gera SAS temporário (User Delegation SAS) para leitura.
+    Requer blob_service configurado com identidade gerenciada.
+    """
+    if not blob_service:
+        raise RuntimeError("Azure Blob não configurado para SAS.")
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(minutes=5)
+    expiry = now + timedelta(minutes=minutes)
+    udk = blob_service.get_user_delegation_key(start, expiry)
+    sas = generate_blob_sas(
+        account_name=ACCOUNT,
+        container_name=CONTAINER,
+        blob_name=blob_name,
+        user_delegation_key=udk,
+        permission=BlobSasPermissions(read=True),
+        expiry=expiry,
+        start=start,
+    )
+    return f"https://{ACCOUNT}.blob.core.windows.net/{CONTAINER}/{blob_name}?{sas}"
+
 
 # -------------------------------------------------
 # App & Config
@@ -71,7 +140,6 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 app.config["PREFERRED_URL_SCHEME"] = "https"
 
-
 # --- Upload roots (persist on Azure App Service) ---
 UPLOAD_ROOT = os.environ.get("UPLOAD_ROOT", os.path.join("/home", "data", "uploads"))
 os.makedirs(UPLOAD_ROOT, exist_ok=True)
@@ -81,12 +149,10 @@ UPLOAD_ASSETS_DIR = os.path.join(UPLOAD_ROOT, "assets")
 UPLOAD_ASSETS_THUMBS_DIR = os.path.join(UPLOAD_ASSETS_DIR, "thumbs")
 UPLOAD_CONTRACTS_DIR = os.path.join(UPLOAD_ROOT, "contracts")
 ACCESS_SIGS_DIR = os.path.join(UPLOAD_ROOT, "access_signatures")
+TMP_DIR = os.path.join(UPLOAD_ROOT, "tmp")
 
-for p in (UPLOAD_SIGS_DIR, UPLOAD_ASSETS_DIR, UPLOAD_ASSETS_THUMBS_DIR, UPLOAD_CONTRACTS_DIR, ACCESS_SIGS_DIR):
+for p in (UPLOAD_SIGS_DIR, UPLOAD_ASSETS_DIR, UPLOAD_ASSETS_THUMBS_DIR, UPLOAD_CONTRACTS_DIR, ACCESS_SIGS_DIR, TMP_DIR):
     os.makedirs(p, exist_ok=True)
-
-ASSETS_DIR = UPLOAD_ASSETS_DIR  # alias
-
 
 ASSETS_DIR = UPLOAD_ASSETS_DIR  # alias
 
@@ -180,15 +246,29 @@ with app.app_context():
     seed_admin()
     seed_default_contract_template()
 
-# --- Email helper (reads from .env; reuses existing send_email() if present) ---
+# ------------------ Email ------------------
+SMTP_HOST = os.getenv("SMTP_HOST", os.getenv("SMTP_SERVER", "smtp.office365.com"))
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+SMTP_TLS = (os.getenv("SMTP_TLS", "true").lower() != "false")
+SMTP_FROM = os.getenv("SMTP_FROM") or SMTP_USER or "no-reply@4uit.us"
+EMAIL_BCC = os.getenv("EMAIL_BCC")  # optional
+
+
+def _split_emails(s: str | None):
+    if not s:
+        return []
+    return [x.strip() for x in s.split(",") if x.strip()]
+
 
 def _env(key, default=None):
     return os.environ.get(key, default)
 
+
 def _send_email_fallback(subject: str, html: str, to: list[str] | str,
                          bcc: list[str] | str | None = None,
                          text: str | None = None):
-    """Plain SMTP fallback using SMTP_* variables from .env."""
     if isinstance(to, str):
         to = [to]
     if bcc and isinstance(bcc, str):
@@ -201,7 +281,6 @@ def _send_email_fallback(subject: str, html: str, to: list[str] | str,
         msg["Bcc"] = ", ".join([b for b in bcc if b])
     msg["Subject"] = subject
 
-    # Derive a simple text version if not provided
     if not text:
         text = (html.replace("<br>", "\n")
                    .replace("<br/>", "\n")
@@ -217,633 +296,15 @@ def _send_email_fallback(subject: str, html: str, to: list[str] | str,
     pwd  = _env("SMTP_PASSWORD", "")
 
     with smtplib.SMTP(host, port) as s:
-        s.set_debuglevel(1 if SMTP_DEBUG else 0)
+        s.set_debuglevel(0)
         s.starttls()
         if user:
             s.login(user, pwd)
         s.send_message(msg)
 
+
 def _html_to_text(html: str) -> str:
-    # very lightweight conversion just for fallback/plain
     return (html or "").replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n").replace("&nbsp;", " ")
-
-def send_mail_4uit(subject: str, html: str, to: list[str] | str,
-                   bcc: list[str] | str | None = None,
-                   text: str | None = None):
-    """
-    Prefer the project's native send_email(...) utility (handles BCC via EMAIL_BCC).
-    If it fails, fallback to raw SMTP.
-    """
-    if isinstance(to, str):
-        to_list = [to]
-    else:
-        to_list = [t for t in to if t]
-
-    text_body = text or _html_to_text(html)
-    html_body = html or (text or "")
-
-    try:
-        # Use your native sender — it already appends EMAIL_BCC internally
-        return send_email(
-            subject=subject,
-            text_body=text_body,
-            html_body=html_body,
-            to_addrs=to_list,
-            cc_addrs=None,
-            attachments=None
-        )
-    except Exception as e:
-        # Log and fallback to raw SMTP
-        current_app.logger.warning("send_mail_4uit: native send_email failed (%s). Falling back to SMTP.", e)
-        # If caller passed an explicit BCC, preserve it on fallback
-        return _send_email_fallback(subject, html_body, to_list, bcc=bcc, text=text_body)
-
-def _asset_public_review_link(asset):
-    """Builds a public review URL (prefer public token, fallback to portal route)."""
-    base = request.host_url.rstrip("/")
-    if getattr(asset, "public_token", None):
-        return f"{base}/review/{asset.public_token}"
-    return f"{base}{url_for('portal_asset_review', asset_id=asset.id)}"
-
-def notify_client_asset_needs_review(asset):
-    """
-    Email the CLIENT when the team uploads/creates an asset that needs review.
-    Recipient: client.contact_email; fallback: NOTIFY_TO.
-    """
-    from models import Client  # local import to avoid circular deps
-
-    client = getattr(asset, "client", None) or Client.query.get(getattr(asset, "client_id", None))
-    to = (client.contact_email if client and client.contact_email else None) or _env("NOTIFY_TO")
-    if not to:
-        return False
-
-    bcc = _env("EMAIL_BCC")  # optional
-    link = _asset_public_review_link(asset)
-    subject = f"[4UIT] Asset awaiting your review: {asset.title or f'#{asset.id}'}"
-    html = f"""
-    <div style="font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:14px">
-      <p>Hello{(' ' + (client.company_name or '')) if client else ''},</p>
-      <p>There is a new item waiting for your approval:</p>
-      <p><strong>{asset.title or 'Asset'}</strong></p>
-      <p><a href="{link}" target="_blank" rel="noopener">Click here to review and approve</a></p>
-      <hr><p style="color:#6b7280">4UIT • Marketing & Software</p>
-    </div>
-    """
-    return send_mail_4uit(subject, html, to=to, bcc=bcc)
-
-def notify_team_asset_review_feedback(asset, review, action_label: str):
-    """
-    Email the TEAM when the CLIENT approves/rejects and leaves comments.
-    Recipient: client.account_manager_email; fallback: NOTIFY_TO; BCC: EMAIL_BCC.
-    """
-    from models import Client
-
-    client = getattr(asset, "client", None) or Client.query.get(getattr(asset, "client_id", None))
-    to = None
-    if client and getattr(client, "account_manager_email", None):
-        to = client.account_manager_email
-    if not to:
-        to = _env("NOTIFY_TO")
-    if not to:
-        return False
-
-    bcc = _env("EMAIL_BCC")
-    link = _asset_public_review_link(asset)
-    subject = f"[4UIT] Client {action_label} • {asset.title or f'#{asset.id}'}"
-    comments = ""
-    if review and getattr(review, "comments", None):
-        comments = f"<p><strong>Client comments:</strong><br>{review.comments}</p>"
-
-    html = f"""
-    <div style="font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:14px">
-      <p><strong>Client:</strong> {(client.company_name if client else '-') }</p>
-      <p><strong>Action:</strong> {action_label}</p>
-      <p><strong>Asset:</strong> {asset.title or f'#{asset.id}'}</p>
-      {comments}
-      <p><a href="{link}" target="_blank" rel="noopener">Open asset</a></p>
-      <hr><p style="color:#6b7280">4UIT • Marketing & Software</p>
-    </div>
-    """
-    return send_mail_4uit(subject, html, to=to, bcc=bcc)
-
-
-# -------------------------------------------------
-# Helpers
-# -------------------------------------------------
-def utcnow():
-    return datetime.now(timezone.utc)
-
-
-def get_request_ip():
-    forwarded = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-    return forwarded or request.remote_addr or "0.0.0.0"
-
-
-def save_signature_data_url(data_url: str) -> str:
-    if not data_url.startswith("data:image"):
-        raise ValueError("Invalid signature data URL")
-    header, b64data = data_url.split(",", 1)
-    if "image/svg" in header:
-        ext = "svg"
-    elif "image/jpeg" in header:
-        ext = "jpg"
-    else:
-        ext = "png"
-
-    filename = f"{uuid.uuid4().hex}.{ext}"
-    rel_path = os.path.join("uploads", "signatures", filename)
-    abs_path = os.path.join(BASE_DIR, rel_path)
-    with open(abs_path, "wb") as f:
-        f.write(base64.b64decode(b64data))
-
-    # Normalizar: fundo transparente + traço preto (sem quadro)
-    if PIL_AVAILABLE:
-        _normalize_signature_image(abs_path)
-
-    return rel_path
-
-
-def _normalize_signature_image(abs_path: str) -> None:
-    """
-    Converte assinatura (mesmo que venha branca em fundo preto)
-    para PNG com fundo transparente e traço preto.
-    """
-    try:
-        from PIL import Image, ImageOps, ImageStat
-
-        # tons de cinza
-        g = Image.open(abs_path).convert("L")
-
-        # se a média for escura, provavelmente é traço branco em fundo preto → inverte
-        mean = ImageStat.Stat(g).mean[0]
-        if mean < 128:
-            g = ImageOps.invert(g)
-
-        # Alpha = intensidade do traço (darker → mais opaco)
-        alpha = ImageOps.invert(g)
-        # limpar ruído muito leve
-        alpha = alpha.point(lambda p: 0 if p < 16 else (255 if p > 220 else p))
-
-        # compor RGBA: preto com alpha da máscara
-        import PIL
-        rgba = Image.new("RGBA", g.size, (0, 0, 0, 0))
-        black = Image.new("RGBA", g.size, (0, 0, 0, 255))
-        rgba.paste(black, (0, 0), mask=alpha)
-        rgba.save(abs_path, "PNG")
-    except Exception:
-        # se algo falhar, mantemos o arquivo original
-        pass
-
-
-def is_safe_next(next_url: str) -> bool:
-    return bool(next_url and next_url.startswith("/"))
-
-
-def admin_required(view):
-    @wraps(view)
-    @login_required
-    def wrapper(*args, **kwargs):
-        if getattr(current_user, "role", None) != "admin":
-            flash("You must be admin to access this area.", "warning")
-            return redirect(url_for("login"))
-        return view(*args, **kwargs)
-    return wrapper
-
-
-def _allowed_ext(name: str) -> bool:
-    ext = (name.rsplit(".", 1)[-1] or "").lower()
-    return ext in {"png", "jpg", "jpeg", "gif", "webp", "mp4", "mov", "webm", "pdf", "mkv"}
-
-
-def _is_image(mime: str, ext: str) -> bool:
-    return (mime or "").startswith("image/") or ext in {"png", "jpg", "jpeg", "gif", "webp"}
-
-
-def _gen_thumb(src_path: str, thumb_path: str, max_size=(480, 480)):
-    if not PIL_AVAILABLE:
-        return
-    try:
-        with Image.open(src_path) as im:
-            # Converte paleta com transparência para RGBA para evitar warning
-            if im.mode == "P":
-                try:
-                    im = im.convert("RGBA")
-                except Exception:
-                    im = im.convert("RGB")
-            elif im.mode not in ("RGB", "RGBA"):
-                im = im.convert("RGBA" if "A" in im.getbands() else "RGB")
-
-            im.thumbnail(max_size)
-            if im.mode == "RGBA":
-                # fundo branco para JPEG
-                from PIL import Image as _PILImage
-                bg = _PILImage.new("RGB", im.size, (255, 255, 255))
-                bg.paste(im, mask=im.split()[3])
-                im = bg
-
-            im.save(thumb_path, "JPEG", quality=82)
-    except Exception as e:
-        app.logger.warning("thumbnail generation failed: %s", e)
-
-
-
-def ensure_public_token(asset: Asset):
-    if not asset.public_token:
-        asset.public_token = secrets.token_urlsafe(24)
-        db.session.add(asset)
-
-
-def _serializer(salt: str):
-    return URLSafeTimedSerializer(app.config["SECRET_KEY"], salt=salt)
-
-def make_onboarding_token(client_id: int) -> str:
-    return _serializer("4uit-onb").dumps({"cid": client_id})
-
-def decode_onboarding_token(token: str, max_age_seconds: int = 60*60*24*14) -> dict:
-    return _serializer("4uit-onb").loads(token, max_age=max_age_seconds)
-
-def make_setpwd_token(email: str) -> str:
-    return _serializer("4uit-setpwd").dumps({"email": email})
-
-def decode_setpwd_token(token: str, max_age_seconds: int = 60*60*24*7) -> dict:
-    return _serializer("4uit-setpwd").loads(token, max_age=max_age_seconds)
-
-def normalize_signature_png(src_path: str) -> str:
-    """
-    Converte qualquer pixel visível da assinatura para PRETO opaco (#000, alpha 255),
-    mantendo fundo totalmente transparente. Retorna o caminho do novo PNG.
-    """
-    if not PIL_AVAILABLE:
-        return src_path
-    try:
-        im = Image.open(src_path).convert("RGBA")
-        px = im.load()
-        w, h = im.size
-        for y in range(h):
-            for x in range(w):
-                r, g, b, a = px[x, y]
-                if a > 16:              # qualquer traço visível
-                    px[x, y] = (0, 0, 0, 255)   # preto sólido
-                else:
-                    px[x, y] = (255, 255, 255, 0)  # totalmente transparente
-        out_path = os.path.join(UPLOAD_SIGS_DIR, f"norm_{uuid.uuid4().hex}.png")
-        im.save(out_path, "PNG")
-        return out_path
-    except Exception:
-        return src_path
-
-
-def _access_request_pdf_path(ar_id: int) -> str:
-    folder = os.path.join(BASE_DIR, "uploads", "access_requests")
-    os.makedirs(folder, exist_ok=True)
-    return os.path.join(folder, f"access-request-{ar_id}.pdf")
-
-def _header_pdf(canvas, title: str) -> float:
-    """Cabeçalho com logo 4UIT (não invade o texto). Retorna Y inicial do conteúdo."""
-    PAGE_W, PAGE_H = LETTER
-    MARGIN_L = 72
-    MARGIN_R = 72
-    MARGIN_T = 72
-    LOGO_H = 28
-
-    y_top = PAGE_H - MARGIN_T
-    x = MARGIN_L
-    logo_path = os.path.join(BASE_DIR, "static", "img", "4uit.png")
-
-    logo_w = 0
-    if os.path.exists(logo_path):
-        try:
-            img = ImageReader(logo_path)
-            iw, ih = img.getSize()
-            logo_w = int(LOGO_H * (iw / float(ih)))
-            canvas.drawImage(
-                img, x, y_top - LOGO_H,
-                width=logo_w, height=LOGO_H,
-                preserveAspectRatio=True, mask="auto"
-            )
-        except Exception:
-            logo_w = 0
-
-    canvas.setFont("Helvetica-Bold", 14)
-    canvas.drawString(x + (logo_w + 10 if logo_w else 0), y_top - 2, title)
-    y_line = y_top - LOGO_H - 6
-    canvas.setLineWidth(0.5)
-    canvas.setStrokeColorRGB(0.7, 0.7, 0.7)
-    canvas.line(MARGIN_L, y_line, PAGE_W - MARGIN_R, y_line)
-    canvas.setStrokeColorRGB(0, 0, 0)
-    return y_line - 14
-
-def _wrap_lines_kv(canvas, key: str, value: str, y: float, max_width: float, font="Helvetica", size=10, bullet=True):
-    """Desenha uma linha '• Key: Value' com quebra automática; retorna novo y."""
-    from reportlab.pdfbase.pdfmetrics import stringWidth
-    canvas.setFont(font, size)
-
-    prefix = f"{key}: "
-    bullet_txt = "• " if bullet else ""
-    # tenta colocar '• Key: ' na mesma linha e faz wrap apenas do value
-    k_w = stringWidth(bullet_txt + prefix, font, size)
-    words = (value or "").replace("\r\n", "\n").split(" ")
-    cur = ""
-    first_line = True
-    for w in words:
-        test = (cur + " " + w).strip()
-        if stringWidth(test, font, size) <= (max_width - (k_w if first_line else 0)):
-            cur = test
-        else:
-            # desenha linha acumulada
-            if first_line:
-                canvas.drawString(72, y, bullet_txt + prefix)
-                canvas.drawString(72 + k_w, y, cur)
-                first_line = False
-            else:
-                canvas.drawString(72, y, cur)
-            y -= 14
-            cur = w
-    # última linha
-    if first_line:
-        canvas.drawString(72, y, bullet_txt + prefix)
-        canvas.drawString(72 + k_w, y, cur)
-    else:
-        canvas.drawString(72, y, cur)
-    return y - 14
-
-def _generate_contract_pdf(contract) -> str | None:
-    """
-    Gera o PDF do contrato e salva em uploads/contracts.
-    - Preenche a página até o limite antes de quebrar
-    - Cabeçalho com logotipo sem invadir o corpo
-    - Assinatura preta (usa normalize_signature_png) + trilha de auditoria
-    """
-    if not REPORTLAB_AVAILABLE:
-        return None
-
-    from reportlab.pdfbase.pdfmetrics import stringWidth
-
-    PAGE_W, PAGE_H = LETTER
-    MARGIN_L = 72
-    MARGIN_R = 72
-    MARGIN_T = 72
-    MARGIN_B = 72
-    LINE = 14
-    CONTENT_W = PAGE_W - MARGIN_L - MARGIN_R
-    LOGO_H = 28  # altura do logo no cabeçalho
-
-    logo_path = os.path.join(BASE_DIR, "static", "img", "4uit.png")
-
-    def header(canvas, title="Master Services Agreement"):
-        """Desenha logotipo + título + linha; retorna Y inicial do conteúdo."""
-        y_top = PAGE_H - MARGIN_T
-        x = MARGIN_L
-        # Logo (se existir), respeitando proporção e sem invadir o conteúdo
-        logo_w = 0
-        if os.path.exists(logo_path):
-            try:
-                img = ImageReader(logo_path)
-                iw, ih = img.getSize()
-                logo_w = int(LOGO_H * (iw / float(ih)))
-                canvas.drawImage(
-                    img,
-                    x, y_top - LOGO_H,  # canto superior-esquerdo do logo
-                    width=logo_w, height=LOGO_H,
-                    preserveAspectRatio=True,
-                    mask="auto",
-                )
-            except Exception:
-                logo_w = 0
-
-        # Título ao lado do logo
-        canvas.setFont("Helvetica-Bold", 14)
-        canvas.drawString(x + (logo_w + 10 if logo_w else 0), y_top - 2, title)
-
-        # Linha divisória
-        y_line = y_top - LOGO_H - 6
-        canvas.setLineWidth(0.5)
-        canvas.setStrokeColorRGB(0.7, 0.7, 0.7)
-        canvas.line(MARGIN_L, y_line, PAGE_W - MARGIN_R, y_line)
-        canvas.setStrokeColorRGB(0, 0, 0)
-
-        # Espaço abaixo da linha para iniciar o conteúdo
-        return y_line - 14
-    
- 
-
-    def wrap_lines(text: str, font_name: str = "Helvetica", font_size: int = 10):
-        out = []
-        for raw in (text or "").replace("\r\n", "\n").split("\n"):
-            words, cur = raw.split(" "), ""
-            for w in words:
-                test = (cur + " " + w).strip()
-                if stringWidth(test, font_name, font_size) <= CONTENT_W:
-                    cur = test
-                else:
-                    if cur:
-                        out.append(cur)
-                    cur = w
-            out.append(cur)
-        return out
-
-    abs_path = _contract_pdf_path(contract.id)
-    c = rl_canvas.Canvas(abs_path, pagesize=LETTER)
-
-    # Cabeçalho da primeira página
-    y = header(c)
-
-    # Metadados
-    c.setFont("Helvetica", 10)
-    meta = [
-        f"Contract ID: {contract.id}",
-        f"Client: {contract.client.company_name if contract.client else '-'}",
-        f"Signer: {contract.signer_name or '-'}",
-        f"Email: {contract.signer_email or '-'}",
-    ]
-    if contract.signed_at:
-        meta.append(f"Signed (UTC): {contract.signed_at.isoformat()}")
-    if contract.signer_ip:
-        meta.append(f"IP: {contract.signer_ip}")
-    for line in meta:
-        if y - LINE < MARGIN_B:
-            c.showPage()
-            y = header(c, "4UIT Solutions — MSA (cont.)")
-            c.setFont("Helvetica", 10)
-        c.drawString(MARGIN_L, y, line)
-        y -= LINE
-
-    # Título do corpo
-    y -= 6
-    c.setFont("Helvetica-Bold", 11)
-    if y - LINE < MARGIN_B:
-        c.showPage()
-        y = header(c, "4UIT Solutions — MSA (cont.)")
-    c.drawString(MARGIN_L, y, "Contract text:")
-    y -= LINE
-
-    # Corpo (sem reservar espaço antecipado: preenche a página toda)
-    c.setFont("Helvetica", 10)
-    for line in wrap_lines(contract.contract_text or ""):
-        if y - LINE < MARGIN_B:
-            c.showPage()
-            y = header(c, "4UIT Solutions — MSA (cont.)")
-            c.setFont("Helvetica", 10)
-        c.drawString(MARGIN_L, y, line)
-        y -= LINE
-
-    # ——— Bloco de assinatura e auditoria ———
-    # Dimensões do bloco
-    sig_w = min(CONTENT_W, 460)
-    sig_h = 0
-    if contract.signature_path:
-        try:
-            sig_abs = os.path.join(BASE_DIR, contract.signature_path.replace("/", os.sep))
-            if os.path.exists(sig_abs):
-                sig_norm = normalize_signature_png(sig_abs)  # mantém traço preto
-                from PIL import Image as _PILImage
-                im = _PILImage.open(sig_norm)
-                iw, ih = im.size
-                scale = sig_w / float(iw)
-                sig_h = int(ih * scale)
-        except Exception:
-            sig_h = 110  # fallback
-
-    # Altura prevista: título + metadados (até 4 linhas) + assinatura + respiro
-    meta_lines = 2 + (1 if contract.signed_at else 0) + (1 if contract.signer_ip else 0)
-    needed = 20 + (meta_lines * LINE) + (sig_h or 110) + 10
-
-    if y - needed < MARGIN_B:
-        c.showPage()
-        y = header(c, "")
-
-    # Cabeçalho da seção
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(MARGIN_L, y, "Signature")
-    y -= 20
-
-    # Metadados da assinatura
-    c.setFont("Helvetica", 10)
-    c.drawString(MARGIN_L, y, f"Client: {contract.client.company_name if contract.client else '-'}"); y -= LINE
-    c.drawString(MARGIN_L, y, f"Signer: {contract.signer_name or '-'} <{contract.signer_email or '-'}>"); y -= LINE
-    if contract.signed_at:
-        c.drawString(MARGIN_L, y, f"Signed (UTC): {contract.signed_at.isoformat()}"); y -= LINE
-    if contract.signer_ip:
-        c.drawString(MARGIN_L, y, f"IP: {contract.signer_ip}"); y -= LINE
-    y -= 6
-
-    # Imagem da assinatura (preta, sem fundo) se existir
-    if contract.signature_path:
-        try:
-            sig_abs = os.path.join(BASE_DIR, contract.signature_path.replace("/", os.sep))
-            if os.path.exists(sig_abs):
-                sig_norm = normalize_signature_png(sig_abs)
-                img = ImageReader(sig_norm)
-                c.drawImage(
-                    img,
-                    MARGIN_L, y - sig_h,
-                    width=sig_w, height=sig_h,
-                    preserveAspectRatio=True,
-                    anchor="nw"
-                    # sem mask: já está com fundo transparente e traço preto
-                )
-                y -= sig_h + 6
-        except Exception:
-            pass
-
-    c.save()
-    return abs_path
-
-
-
-def _generate_access_request_pdf(ar: "AccessRequest") -> str:
-    """Gera PDF da versão de Access Request, preenchendo página até o limite, com histórico/auditoria."""
-    abs_path = _access_request_pdf_path(ar.id)
-    c = rl_canvas.Canvas(abs_path, pagesize=LETTER)
-
-    PAGE_W, PAGE_H = LETTER
-    MARGIN_L = 72
-    MARGIN_R = 72
-    MARGIN_B = 72
-    LINE = 14
-    CONTENT_W = PAGE_W - MARGIN_L - MARGIN_R
-
-    # Cabeçalho
-    y = _header_pdf(c, "4UIT Solutions — Access Information")
-
-    # Metadados
-    c.setFont("Helvetica", 10)
-    metas = [
-        f"Version ID: {ar.id}",
-        f"Client: {ar.client.company_name if ar.client else '-'}",
-        f"Submitted at (UTC): {ar.submitted_at.isoformat() if ar.submitted_at else '-'}",
-        f"Submitted by: {ar.submitted_by or '-'}",
-        f"E-mail: {ar.submitted_email or '-'}",
-        f"IP: {ar.submitted_ip or '-'}",
-    ]
-    for m in metas:
-        if y - LINE < MARGIN_B:
-            c.showPage(); y = _header_pdf(c, "4UIT Solutions — Access Information (cont.)"); c.setFont("Helvetica", 10)
-        c.drawString(MARGIN_L, y, m); y -= LINE
-
-    # Título
-    y -= 6
-    c.setFont("Helvetica-Bold", 11)
-    if y - LINE < MARGIN_B:
-        c.showPage(); y = _header_pdf(c, "4UIT Solutions — Access Information (cont.)")
-    c.drawString(MARGIN_L, y, "Access data:"); y -= LINE
-
-    # Dados (Key → Value) com quebra automática
-    c.setFont("Helvetica", 10)
-    data = ar.data or {}
-    # ordena por chave para ficar estável
-    for k in sorted(data.keys()):
-        v = data[k]
-        v_txt = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, indent=None)
-        if y - LINE < MARGIN_B:
-            c.showPage(); y = _header_pdf(c, "4UIT Solutions — Access Information (cont.)"); c.setFont("Helvetica", 10)
-        y = _wrap_lines_kv(c, key=str(k), value=str(v_txt), y=y, max_width=CONTENT_W)
-
-    c.save()
-    return abs_path
-
-
-def _safe_generate_contract_pdf(contract):
-    """
-    Tenta gerar o PDF do contrato. Se a função original não existir
-    ou o ReportLab não estiver disponível, apenas retorna None.
-    """
-    try:
-        return _generate_contract_pdf(contract)  # usa a sua função se existir
-    except NameError:
-        return None
-    except Exception:
-        return None
-
-
-# Jinja filter: highlight
-@app.template_filter("hl")
-def jinja_highlight(text, q):
-    if not text or not q:
-        return text
-    try:
-        pattern = re.compile(re.escape(q), re.IGNORECASE)
-        esc = escape(str(text))
-        result = pattern.sub(lambda m: Markup(f"<mark>{escape(m.group(0))}</mark>"), str(esc))
-        return Markup(result)
-    except Exception:
-        return text
-
-
-# ------------------ Email ------------------
-SMTP_HOST = os.getenv("SMTP_HOST", os.getenv("SMTP_SERVER", "smtp.office365.com"))
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-SMTP_TLS = (os.getenv("SMTP_TLS", "true").lower() != "false")
-SMTP_FROM = os.getenv("SMTP_FROM") or SMTP_USER or "no-reply@4uit.us"
-EMAIL_BCC = os.getenv("EMAIL_BCC")  # optional
-
-
-def _split_emails(s: str | None):
-    if not s:
-        return []
-    return [x.strip() for x in s.split(",") if x.strip()]
 
 
 def send_email(subject: str, text_body: str, html_body: str,
@@ -880,6 +341,581 @@ def send_email(subject: str, text_body: str, html_body: str,
 
 
 # -------------------------------------------------
+# Helpers
+# -------------------------------------------------
+def utcnow():
+    return datetime.now(timezone.utc)
+
+
+def get_request_ip():
+    forwarded = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+    return forwarded or request.remote_addr or "0.0.0.0"
+
+
+# ======= Assinatura: fallback local legado =======
+def save_signature_data_url_local(data_url: str) -> str:
+    """
+    Versão LEGADA (local) – salva em UPLOAD_SIGS_DIR (persistente no App Service).
+    Retorna caminho relativo tipo 'uploads/signatures/xxx.png'
+    """
+    if not data_url.startswith("data:image"):
+        raise ValueError("Invalid signature data URL")
+    header, b64data = data_url.split(",", 1)
+    if "image/svg" in header:
+        ext = "svg"
+    elif "image/jpeg" in header:
+        ext = "jpg"
+    else:
+        ext = "png"
+
+    filename = f"{uuid.uuid4().hex}.{ext}"
+    rel_path = os.path.join("uploads", "signatures", filename)
+    abs_path = os.path.join(UPLOAD_SIGS_DIR, filename)
+    with open(abs_path, "wb") as f:
+        f.write(base64.b64decode(b64data))
+
+    if PIL_AVAILABLE:
+        _normalize_signature_image(abs_path)
+
+    return rel_path
+
+
+def save_signature_unified(data_url: str) -> dict:
+    """
+    Tenta salvar no Azure Blob. Se indisponível, salva local.
+    Retorna dict:
+      { "blob_name": str|None, "local_relpath": str|None }
+    """
+    # Preferencial: Blob
+    if blob_service and container_client:
+        try:
+            blob_name = save_dataurl_png_to_blob(data_url, folder="signatures")
+            return {"blob_name": blob_name, "local_relpath": None}
+        except Exception:
+            pass
+    # Fallback: local
+    rel = save_signature_data_url_local(data_url)
+    return {"blob_name": None, "local_relpath": rel}
+
+
+def _normalize_signature_image(abs_path: str) -> None:
+    try:
+        from PIL import Image, ImageOps, ImageStat
+        g = Image.open(abs_path).convert("L")
+        mean = ImageStat.Stat(g).mean[0]
+        if mean < 128:
+            g = ImageOps.invert(g)
+        alpha = ImageOps.invert(g)
+        alpha = alpha.point(lambda p: 0 if p < 16 else (255 if p > 220 else p))
+        from PIL import Image as _PIL
+        rgba = _PIL.new("RGBA", g.size, (0, 0, 0, 0))
+        black = _PIL.new("RGBA", g.size, (0, 0, 0, 255))
+        rgba.paste(black, (0, 0), mask=alpha)
+        rgba.save(abs_path, "PNG")
+    except Exception:
+        pass
+
+
+def is_safe_next(next_url: str) -> bool:
+    return bool(next_url and next_url.startswith("/"))
+
+
+def admin_required(view):
+    @wraps(view)
+    @login_required
+    def wrapper(*args, **kwargs):
+        if getattr(current_user, "role", None) != "admin":
+            flash("You must be admin to access this area.", "warning")
+            return redirect(url_for("login"))
+        return view(*args, **kwargs)
+    return wrapper
+
+
+def _allowed_ext(name: str) -> bool:
+    ext = (name.rsplit(".", 1)[-1] or "").lower()
+    return ext in {"png", "jpg", "jpeg", "gif", "webp", "mp4", "mov", "webm", "pdf", "mkv"}
+
+
+def _is_image(mime: str, ext: str) -> bool:
+    return (mime or "").startswith("image/") or ext in {"png", "jpg", "jpeg", "gif", "webp"}
+
+
+def _gen_thumb(src_path: str, thumb_path: str, max_size=(480, 480)):
+    if not PIL_AVAILABLE:
+        return
+    try:
+        with Image.open(src_path) as im:
+            if im.mode == "P":
+                try:
+                    im = im.convert("RGBA")
+                except Exception:
+                    im = im.convert("RGB")
+            elif im.mode not in ("RGB", "RGBA"):
+                im = im.convert("RGBA" if "A" in im.getbands() else "RGB")
+
+            im.thumbnail(max_size)
+            if im.mode == "RGBA":
+                from PIL import Image as _PILImage
+                bg = _PILImage.new("RGB", im.size, (255, 255, 255))
+                bg.paste(im, mask=im.split()[3])
+                im = bg
+
+            im.save(thumb_path, "JPEG", quality=82)
+    except Exception as e:
+        app.logger.warning("thumbnail generation failed: %s", e)
+
+
+def ensure_public_token(asset: Asset):
+    if not asset.public_token:
+        asset.public_token = secrets.token_urlsafe(24)
+        db.session.add(asset)
+
+
+def _serializer(salt: str):
+    return URLSafeTimedSerializer(app.config["SECRET_KEY"], salt=salt)
+
+def make_onboarding_token(client_id: int) -> str:
+    return _serializer("4uit-onb").dumps({"cid": client_id})
+
+def decode_onboarding_token(token: str, max_age_seconds: int = 60*60*24*14) -> dict:
+    return _serializer("4uit-onb").loads(token, max_age=max_age_seconds)
+
+def make_setpwd_token(email: str) -> str:
+    return _serializer("4uit-setpwd").dumps({"email": email})
+
+def decode_setpwd_token(token: str, max_age_seconds: int = 60*60*24*7) -> dict:
+    return _serializer("4uit-setpwd").loads(token, max_age=max_age_seconds)
+
+
+def normalize_signature_png(src_path: str) -> str:
+    if not PIL_AVAILABLE:
+        return src_path
+    try:
+        im = Image.open(src_path).convert("RGBA")
+        px = im.load()
+        w, h = im.size
+        for y in range(h):
+            for x in range(w):
+                r, g, b, a = px[x, y]
+                if a > 16:
+                    px[x, y] = (0, 0, 0, 255)
+                else:
+                    px[x, y] = (255, 255, 255, 0)
+        out_path = os.path.join(UPLOAD_SIGS_DIR, f"norm_{uuid.uuid4().hex}.png")
+        im.save(out_path, "PNG")
+        return out_path
+    except Exception:
+        return src_path
+
+
+# ===== Helpers para PDF com Blob =====
+def blob_to_temp_png(blob_name: str) -> str:
+    tmp_path = os.path.join(TMP_DIR, f"{uuid.uuid4().hex}.png")
+    bc = container_client.get_blob_client(blob_name)
+    with open(tmp_path, "wb") as f:
+        f.write(bc.download_blob().readall())
+    return tmp_path
+
+
+def contract_signature_abs_path(contract) -> str | None:
+    # 1) Blob primeiro (se campo existir e azure estiver configurado)
+    try:
+        sig_blob = getattr(contract, "signature_blob", None)
+    except Exception:
+        sig_blob = None
+
+    if sig_blob and blob_service and container_client:
+        try:
+            return blob_to_temp_png(sig_blob)
+        except Exception:
+            pass
+
+    # 2) Legado local
+    sig_rel = getattr(contract, "signature_path", None)
+    if sig_rel:
+        sig_abs = os.path.join(BASE_DIR, sig_rel.replace("/", os.sep))
+        if os.path.exists(sig_abs):
+            return sig_abs
+        # também testar na nova raiz persistente
+        alt_abs = os.path.join(UPLOAD_SIGS_DIR, os.path.basename(sig_rel))
+        if os.path.exists(alt_abs):
+            return alt_abs
+
+    return None
+
+
+def _access_request_pdf_path(ar_id: int) -> str:
+    folder = os.path.join(BASE_DIR, "uploads", "access_requests")
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, f"access-request-{ar_id}.pdf")
+
+
+def _header_pdf(canvas, title: str) -> float:
+    PAGE_W, PAGE_H = LETTER
+    MARGIN_L = 72
+    MARGIN_R = 72
+    MARGIN_T = 72
+    LOGO_H = 28
+
+    y_top = PAGE_H - MARGIN_T
+    x = MARGIN_L
+    logo_path = os.path.join(BASE_DIR, "static", "img", "4uit.png")
+
+    logo_w = 0
+    if os.path.exists(logo_path):
+        try:
+            img = ImageReader(logo_path)
+            iw, ih = img.getSize()
+            logo_w = int(LOGO_H * (iw / float(ih)))
+            canvas.drawImage(
+                img, x, y_top - LOGO_H,
+                width=logo_w, height=LOGO_H,
+                preserveAspectRatio=True, mask="auto"
+            )
+        except Exception:
+            logo_w = 0
+
+    canvas.setFont("Helvetica-Bold", 14)
+    canvas.drawString(x + (logo_w + 10 if logo_w else 0), y_top - 2, title)
+    y_line = y_top - LOGO_H - 6
+    canvas.setLineWidth(0.5)
+    canvas.setStrokeColorRGB(0.7, 0.7, 0.7)
+    canvas.line(MARGIN_L, y_line, PAGE_W - MARGIN_R, y_line)
+    canvas.setStrokeColorRGB(0, 0, 0)
+    return y_line - 14
+
+
+def _wrap_lines_kv(canvas, key: str, value: str, y: float, max_width: float, font="Helvetica", size=10, bullet=True):
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    canvas.setFont(font, size)
+
+    prefix = f"{key}: "
+    bullet_txt = "• " if bullet else ""
+    k_w = stringWidth(bullet_txt + prefix, font, size)
+    words = (value or "").replace("\r\n", "\n").split(" ")
+    cur = ""
+    first_line = True
+    for w in words:
+        test = (cur + " " + w).strip()
+        if stringWidth(test, font, size) <= (max_width - (k_w if first_line else 0)):
+            cur = test
+        else:
+            if first_line:
+                canvas.drawString(72, y, bullet_txt + prefix)
+                canvas.drawString(72 + k_w, y, cur)
+                first_line = False
+            else:
+                canvas.drawString(72, y, cur)
+            y -= 14
+            cur = w
+    if first_line:
+        canvas.drawString(72, y, bullet_txt + prefix)
+        canvas.drawString(72 + k_w, y, cur)
+    else:
+        canvas.drawString(72, y, cur)
+    return y - 14
+
+
+def _generate_contract_pdf(contract) -> str | None:
+    if not REPORTLAB_AVAILABLE:
+        return None
+
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+
+    PAGE_W, PAGE_H = LETTER
+    MARGIN_L = 72
+    MARGIN_R = 72
+    MARGIN_T = 72
+    MARGIN_B = 72
+    LINE = 14
+    CONTENT_W = PAGE_W - MARGIN_L - MARGIN_R
+    LOGO_H = 28
+
+    logo_path = os.path.join(BASE_DIR, "static", "img", "4uit.png")
+
+    def header(canvas, title="Master Services Agreement"):
+        y_top = PAGE_H - MARGIN_T
+        x = MARGIN_L
+        logo_w = 0
+        if os.path.exists(logo_path):
+            try:
+                img = ImageReader(logo_path)
+                iw, ih = img.getSize()
+                logo_w = int(LOGO_H * (iw / float(ih)))
+                canvas.drawImage(
+                    img,
+                    x, y_top - LOGO_H,
+                    width=logo_w, height=LOGO_H,
+                    preserveAspectRatio=True,
+                    mask="auto",
+                )
+            except Exception:
+                logo_w = 0
+
+        canvas.setFont("Helvetica-Bold", 14)
+        canvas.drawString(x + (logo_w + 10 if logo_w else 0), y_top - 2, title)
+        y_line = y_top - LOGO_H - 6
+        canvas.setLineWidth(0.5)
+        canvas.setStrokeColorRGB(0.7, 0.7, 0.7)
+        canvas.line(MARGIN_L, y_line, PAGE_W - MARGIN_R, y_line)
+        canvas.setStrokeColorRGB(0, 0, 0)
+        return y_line - 14
+
+    def wrap_lines(text: str, font_name: str = "Helvetica", font_size: int = 10):
+        out = []
+        for raw in (text or "").replace("\r\n", "\n").split("\n"):
+            words, cur = raw.split(" "), ""
+            for w in words:
+                test = (cur + " " + w).strip()
+                if stringWidth(test, font_name, font_size) <= CONTENT_W:
+                    cur = test
+                else:
+                    if cur:
+                        out.append(cur)
+                    cur = w
+            out.append(cur)
+        return out
+
+    abs_path = _contract_pdf_path(contract.id)
+    c = rl_canvas.Canvas(abs_path, pagesize=LETTER)
+
+    y = header(c)
+
+    c.setFont("Helvetica", 10)
+    meta = [
+        f"Contract ID: {contract.id}",
+        f"Client: {contract.client.company_name if contract.client else '-'}",
+        f"Signer: {contract.signer_name or '-'}",
+        f"Email: {contract.signer_email or '-'}",
+    ]
+    if contract.signed_at:
+        meta.append(f"Signed (UTC): {contract.signed_at.isoformat()}")
+    if contract.signer_ip:
+        meta.append(f"IP: {contract.signer_ip}")
+    for line in meta:
+        if y - LINE < MARGIN_B:
+            c.showPage()
+            y = header(c, "4UIT Solutions — MSA (cont.)")
+            c.setFont("Helvetica", 10)
+        c.drawString(MARGIN_L, y, line)
+        y -= LINE
+
+    y -= 6
+    c.setFont("Helvetica-Bold", 11)
+    if y - LINE < MARGIN_B:
+        c.showPage()
+        y = header(c, "4UIT Solutions — MSA (cont.)")
+    c.drawString(MARGIN_L, y, "Contract text:")
+    y -= LINE
+
+    c.setFont("Helvetica", 10)
+    for line in wrap_lines(contract.contract_text or ""):
+        if y - LINE < MARGIN_B:
+            c.showPage()
+            y = header(c, "4UIT Solutions — MSA (cont.)")
+            c.setFont("Helvetica", 10)
+        c.drawString(MARGIN_L, y, line)
+        y -= LINE
+
+    # ===== bloco da assinatura (compatível Blob/Local) =====
+    sig_w = min(CONTENT_W, 460)
+    sig_h = 0
+    sig_abs = contract_signature_abs_path(contract)
+    if sig_abs:
+        try:
+            from PIL import Image as _PILImage
+            sig_norm = normalize_signature_png(sig_abs)
+            im = _PILImage.open(sig_norm)
+            iw, ih = im.size
+            scale = sig_w / float(iw)
+            sig_h = int(ih * scale)
+        except Exception:
+            sig_h = 110
+
+    meta_lines = 2 + (1 if contract.signed_at else 0) + (1 if contract.signer_ip else 0)
+    needed = 20 + (meta_lines * LINE) + (sig_h or 110) + 10
+    if y - needed < MARGIN_B:
+        c.showPage()
+        y = header(c, "")
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(MARGIN_L, y, "Signature")
+    y -= 20
+
+    c.setFont("Helvetica", 10)
+    c.drawString(MARGIN_L, y, f"Client: {contract.client.company_name if contract.client else '-'}"); y -= LINE
+    c.drawString(MARGIN_L, y, f"Signer: {contract.signer_name or '-'} <{contract.signer_email or '-'}>"); y -= LINE
+    if contract.signed_at:
+        c.drawString(MARGIN_L, y, f"Signed (UTC): {contract.signed_at.isoformat()}"); y -= LINE
+    if contract.signer_ip:
+        c.drawString(MARGIN_L, y, f"IP: {contract.signer_ip}"); y -= LINE
+    y -= 6
+
+    if sig_abs:
+        try:
+            sig_norm = normalize_signature_png(sig_abs)
+            img = ImageReader(sig_norm)
+            c.drawImage(
+                img,
+                MARGIN_L, y - sig_h,
+                width=sig_w, height=sig_h,
+                preserveAspectRatio=True,
+                anchor="nw"
+            )
+            y -= sig_h + 6
+        except Exception:
+            pass
+
+    c.save()
+    return abs_path
+
+
+def _generate_access_request_pdf(ar: "AccessRequest") -> str:
+    abs_path = _access_request_pdf_path(ar.id)
+    c = rl_canvas.Canvas(abs_path, pagesize=LETTER)
+
+    PAGE_W, PAGE_H = LETTER
+    MARGIN_L = 72
+    MARGIN_R = 72
+    MARGIN_B = 72
+    LINE = 14
+    CONTENT_W = PAGE_W - MARGIN_L - MARGIN_R
+
+    y = _header_pdf(c, "4UIT Solutions — Access Information")
+
+    c.setFont("Helvetica", 10)
+    client_name = "-"
+    if getattr(ar, "client", None):
+        client_name = ar.client.company_name or "-"
+    elif getattr(ar, "client_company", None):
+        client_name = ar.client_company or "-"
+
+    audit = [
+        f"Client: {client_name}",
+        f"Signer: {ar.signer_name or '-'} <{ar.signer_email or '-'}>",
+        f"Submitted (UTC): {ar.submitted_at.isoformat() if ar.submitted_at else '-'}",
+    ]
+    if getattr(ar, "signer_ip", None):
+        audit.append(f"IP: {ar.signer_ip}")
+
+    for line in audit:
+        c.drawString(MARGIN_L, y, line); y -= LINE
+
+    y -= 6
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(MARGIN_L, y, "Access details")
+    y -= LINE
+    c.setFont("Helvetica", 10)
+
+    def wrap(text, font="Helvetica", size=10):
+        from reportlab.pdfbase.pdfmetrics import stringWidth
+        out = []
+        for raw in (text or "").replace("\r\n", "\n").split("\n"):
+            words, cur = raw.split(" "), ""
+            for w in words:
+                test = (cur + " " + w).strip()
+                if stringWidth(test, font, size) <= CONTENT_W:
+                    cur = test
+                else:
+                    if cur: out.append(cur)
+                    cur = w
+            out.append(cur)
+        return out
+
+    pairs = [
+        ("Instagram (user)", ar.instagram_user),
+        ("Facebook Page", ar.facebook_page),
+        ("Meta BM ID", ar.meta_bm_id),
+        ("Meta Ads Account", ar.meta_ads_account_id),
+        ("Google Ads ID", ar.google_ads_id),
+        ("Website URL", ar.website_url),
+        ("Hosting", ar.hosting),
+        ("Hosting Login", ar.hosting_login),
+        ("Hosting Password", ar.hosting_password),
+        ("Domain Registrar", ar.domain_registrar),
+        ("Domain Login", ar.domain_login),
+        ("Domain Password", ar.domain_password),
+        ("Brand notes", ar.brand_notes),
+    ]
+
+    for label, value in pairs:
+        txt = f"{label}: {value or '-'}"
+        lines = wrap(txt, size=10)
+        for ln in lines:
+            if y <= MARGIN_B + 220:
+                c.showPage(); y = PAGE_H - 72
+                c.setFont("Helvetica-Bold", 12)
+                c.drawString(MARGIN_L, y, "Access Information (cont.)")
+                y -= 18
+                c.setFont("Helvetica", 10)
+            c.drawString(MARGIN_L, y, ln)
+            y -= LINE
+        y -= 2
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(MARGIN_L, y, "Signature")
+    y -= 18
+
+    c.setFont("Helvetica", 10)
+    c.drawString(MARGIN_L, y, f"Client: {client_name}"); y -= LINE
+    c.drawString(MARGIN_L, y, f"Signer: {ar.signer_name or '-'} <{ar.signer_email or '-'}>"); y -= LINE
+    if ar.submitted_at:
+        c.drawString(MARGIN_L, y, f"Submitted (UTC): {ar.submitted_at.isoformat()}"); y -= LINE
+    y -= 6
+
+    if ar.signature_path:
+        try:
+            sig_abs = os.path.join(BASE_DIR, ar.signature_path.replace("/", os.sep))
+            if os.path.exists(sig_abs):
+                sig_use = normalize_signature_png(sig_abs)
+                from PIL import Image as _PILImage
+                iw, ih = _PILImage.open(sig_use).size
+                max_w = min(CONTENT_W, 460)
+                scale = max_w / float(iw)
+                sig_w = max_w
+                sig_h = int(ih * scale)
+
+                img = ImageReader(sig_use)
+                c.drawImage(img, MARGIN_L, y - sig_h, width=sig_w, height=sig_h,
+                            preserveAspectRatio=True, anchor='nw')
+                y -= sig_h + 6
+        except Exception:
+            pass
+
+    c.save()
+    return abs_path
+
+
+def _safe_generate_contract_pdf(contract):
+    try:
+        return _generate_contract_pdf(contract)
+    except NameError:
+        return None
+    except Exception:
+        return None
+
+
+# Jinja filter: highlight
+@app.template_filter("hl")
+def jinja_highlight(text, q):
+    if not text or not q:
+        return text
+    try:
+        pattern = re.compile(re.escape(q), re.IGNORECASE)
+        esc = escape(str(text))
+        result = pattern.sub(lambda m: Markup(f"<mark>{escape(m.group(0))}</mark>"), str(esc))
+        return Markup(result)
+    except Exception:
+        return text
+
+
+# Expor helper SAS no Jinja (para thumbnails/visualização se um dia precisar)
+@app.context_processor
+def inject_blob_helpers():
+    return {"make_sas_url": make_sas_url if (blob_service and container_client) else lambda *a, **k: ""}
+
+
+# -------------------------------------------------
 # Util
 # -------------------------------------------------
 @app.get("/admin/assets/ensure-tokens")
@@ -902,12 +938,6 @@ def home():
 
 @app.get("/contract")
 def contract_page():
-    """
-    Aceita:
-      - ?client_id=123 (preferência)
-      - ou ?company=&email= para pré-preencher campos
-      - ?tpl=ID para forçar template
-    """
     client_id = request.args.get("client_id", type=int)
     tpl_id = request.args.get("tpl", type=int)
     prefill_email = (request.args.get("email") or "").strip()
@@ -969,20 +999,16 @@ def login():
         if user and user.check_password(password):
             login_user(user, remember=remember)
 
-            # honor ?next= if it's a safe local path
             nxt = request.args.get("next") or request.form.get("next")
             if nxt and is_safe_next(nxt):
                 return redirect(nxt)
 
-            # role-based landing
             dest = "admin_home" if getattr(user, "role", "") == "admin" else "portal_home"
             return redirect(url_for(dest))
 
-        # invalid credentials
         flash("Invalid credentials.", "danger")
         return redirect(url_for("login"))
 
-    # GET
     return render_template("login.html", next=request.args.get("next"))
 
 
@@ -1008,179 +1034,12 @@ def _access_pdf_dir():
     return p
 
 def _access_pdf_path(ar_id: int) -> str:
-    """Retorna o caminho absoluto do PDF do Access Request."""
     folder = os.path.join(BASE_DIR, "uploads", "access", "pdf")
     os.makedirs(folder, exist_ok=True)
     return os.path.join(folder, f"access-{ar_id}.pdf")
 
 def _contract_pdf_path(contract_id: int) -> str:
     return os.path.join(UPLOAD_CONTRACTS_DIR, f"contract_{contract_id}.pdf")
-
-def _generate_access_pdf(ar) -> str | None:
-    """
-    Gera o PDF com os dados do Access Request e assinatura.
-    Estilo alinhado ao contrato: cabeçalho com logo, primeira página preenchida
-    ao máximo antes de quebrar, e trilha de auditoria + assinatura.
-    """
-    if not REPORTLAB_AVAILABLE:
-        return None
-
-    from reportlab.lib.pagesizes import LETTER
-    from reportlab.pdfgen import canvas as rl_canvas
-    from reportlab.lib.utils import ImageReader
-    from reportlab.pdfbase.pdfmetrics import stringWidth
-
-    # Layout base
-    PAGE_W, PAGE_H = LETTER
-    MARGIN_L = 72
-    MARGIN_R = 72
-    MARGIN_T = 72
-    MARGIN_B = 72
-    LINE = 14
-    CONTENT_W = PAGE_W - MARGIN_L - MARGIN_R
-
-    def wrap(text, font="Helvetica", size=10):
-        out = []
-        for raw in (text or "").replace("\r\n", "\n").split("\n"):
-            words, cur = raw.split(" "), ""
-            for w in words:
-                test = (cur + " " + w).strip()
-                if stringWidth(test, font, size) <= CONTENT_W:
-                    cur = test
-                else:
-                    if cur: out.append(cur)
-                    cur = w
-            out.append(cur)
-        return out
-
-    path = _access_pdf_path(ar.id)
-    c = rl_canvas.Canvas(path, pagesize=LETTER)
-
-    y = PAGE_H - MARGIN_T
-
-    # Cabeçalho com logo (não invade área do texto)
-    try:
-        logo_abs = os.path.join(BASE_DIR, "static", "img", "4uit.png")
-        if os.path.exists(logo_abs):
-            img = ImageReader(logo_abs)
-            logo_h = 28
-            logo_w = 28
-            c.drawImage(img, MARGIN_L, y - logo_h + 4, width=logo_w, height=logo_h, mask='auto')
-            c.setFont("Helvetica-Bold", 14)
-            c.drawString(MARGIN_L + logo_w + 10, y, "4UIT Solutions — Access Information")
-        else:
-            c.setFont("Helvetica-Bold", 14)
-            c.drawString(MARGIN_L, y, "4UIT Solutions — Access Information")
-    except Exception:
-        c.setFont("Helvetica-Bold", 14)
-        c.drawString(MARGIN_L, y, "4UIT Solutions — Access Information")
-
-    y -= 22
-    c.setLineWidth(0.6)
-    c.line(MARGIN_L, y, PAGE_W - MARGIN_R, y)
-    y -= 12
-
-    # Auditoria
-    c.setFont("Helvetica", 10)
-    client_name = "-"
-    if getattr(ar, "client", None):
-        client_name = ar.client.company_name or "-"
-    elif getattr(ar, "client_company", None):
-        client_name = ar.client_company or "-"
-
-    audit = [
-        f"Client: {client_name}",
-        f"Signer: {ar.signer_name or '-'} <{ar.signer_email or '-'}>",
-        f"Submitted (UTC): {ar.submitted_at.isoformat() if ar.submitted_at else '-'}",
-    ]
-    if getattr(ar, "signer_ip", None):
-        audit.append(f"IP: {ar.signer_ip}")
-
-    for line in audit:
-        c.drawString(MARGIN_L, y, line); y -= LINE
-
-    y -= 6
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(MARGIN_L, y, "Access details")
-    y -= LINE
-    c.setFont("Helvetica", 10)
-
-    # Campos principais
-    pairs = [
-        ("Instagram (user)", ar.instagram_user),
-        ("Facebook Page", ar.facebook_page),
-        ("Meta BM ID", ar.meta_bm_id),
-        ("Meta Ads Account", ar.meta_ads_account_id),
-        ("Google Ads ID", ar.google_ads_id),
-        ("Website URL", ar.website_url),
-        ("Hosting", ar.hosting),
-        ("Hosting Login", ar.hosting_login),
-        ("Hosting Password", ar.hosting_password),
-        ("Domain Registrar", ar.domain_registrar),
-        ("Domain Login", ar.domain_login),
-        ("Domain Password", ar.domain_password),
-        ("Brand notes", ar.brand_notes),
-    ]
-
-    for label, value in pairs:
-        txt = f"{label}: {value or '-'}"
-        lines = wrap(txt, size=10)
-        for ln in lines:
-            if y <= MARGIN_B + 220:
-                c.showPage(); y = PAGE_H - MARGIN_T
-                c.setFont("Helvetica-Bold", 12)
-                c.drawString(MARGIN_L, y, "Access Information (cont.)")
-                y -= 18
-                c.setFont("Helvetica", 10)
-            c.drawString(MARGIN_L, y, ln)
-            y -= LINE
-        y -= 2
-
-    # Assinatura
-    block_title = 18
-    sig_h_est = 160
-    needed = block_title + sig_h_est + 10 + (3 * LINE)
-
-    if y - needed < MARGIN_B:
-        c.showPage(); y = PAGE_H - MARGIN_T
-
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(MARGIN_L, y, "Signature")
-    y -= 18
-
-    c.setFont("Helvetica", 10)
-    c.drawString(MARGIN_L, y, f"Client: {client_name}"); y -= LINE
-    c.drawString(MARGIN_L, y, f"Signer: {ar.signer_name or '-'} <{ar.signer_email or '-'}>"); y -= LINE
-    if ar.submitted_at:
-        c.drawString(MARGIN_L, y, f"Submitted (UTC): {ar.submitted_at.isoformat()}"); y -= LINE
-    y -= 6
-
-    if ar.signature_path:
-        try:
-            sig_abs = os.path.join(BASE_DIR, ar.signature_path.replace("/", os.sep))
-            if os.path.exists(sig_abs):
-                sig_use = sig_abs
-                try:
-                    sig_use = normalize_signature_png(sig_abs)
-                except Exception:
-                    pass
-
-                from PIL import Image as _PILImage
-                iw, ih = _PILImage.open(sig_use).size
-                max_w = min(CONTENT_W, 460)
-                scale = max_w / float(iw)
-                sig_w = max_w
-                sig_h = int(ih * scale)
-
-                img = ImageReader(sig_use)
-                c.drawImage(img, MARGIN_L, y - sig_h, width=sig_w, height=sig_h,
-                            preserveAspectRatio=True, anchor='nw')
-                y -= sig_h + 6
-        except Exception:
-            pass
-
-    c.save()
-    return path
 
 
 @app.post("/api/whoami")
@@ -1213,12 +1072,13 @@ def api_signature():
         db.session.add(client)
         db.session.flush()
 
-    # --- assinatura (salva imagem/PNG do draw-pad)
+    # --- assinatura: tenta Blob; fallback local
     try:
-        signature_path = save_signature_data_url(data["signature_data_url"])
+        sig_info = save_signature_unified(data["signature_data_url"])
     except Exception as e:
         return jsonify({"ok": False, "error": f"Invalid signature: {e}"}), 400
 
+    # cria o contrato
     contract = Contract(
         client_id=client.id,
         signer_name=data["signer_name"],
@@ -1226,9 +1086,18 @@ def api_signature():
         signed_at=utcnow(),
         signer_ip=get_request_ip(),
         user_agent=request.headers.get("User-Agent", ""),
-        signature_path=signature_path,
         contract_text=data.get("contract_text", ""),
     )
+
+    # Preenche campos de assinatura, respeitando o modelo atual
+    if sig_info["blob_name"] and hasattr(Contract, "signature_blob"):
+        try:
+            contract.signature_blob = sig_info["blob_name"]
+        except Exception:
+            pass  # se o modelo ainda não tem a coluna, ignora
+    if sig_info["local_relpath"]:
+        contract.signature_path = sig_info["local_relpath"]
+
     db.session.add(contract)
     db.session.commit()
 
@@ -1241,7 +1110,7 @@ def api_signature():
             u = User.query.filter_by(email=signer_email).first()
             if not u:
                 u = User(name=signer_name, email=signer_email, role="client")
-                u.set_password(secrets.token_urlsafe(12))  # temp
+                u.set_password(secrets.token_urlsafe(12))
                 db.session.add(u)
                 db.session.commit()
             else:
@@ -1251,7 +1120,6 @@ def api_signature():
             sp_token = make_setpwd_token(signer_email)
             sp_link = url_for("set_password", token=sp_token, _external=True)
     except Exception:
-        # não falhar a rota por causa da criação do usuário
         pass
 
     # --- gera PDF e prepara anexo
@@ -1266,7 +1134,6 @@ def api_signature():
         portal_link = url_for("portal_home", _external=True)
         subject = f"Your contract with 4UIT — signed (#{contract.id})"
 
-        # texto simples
         text_lines = [
             f"Hi {contract.signer_name},",
             "",
@@ -1288,11 +1155,9 @@ def api_signature():
 
         text_body = "\n".join(text_lines)
 
-        # HTML seguro (pré-computa trechos dinâmicos)
         signer_name_safe = escape(contract.signer_name or "")
         client_name_safe = escape(client.company_name or "-") if client else "-"
         portal_link_safe = portal_link
-
         if sp_link:
             password_html = f'<span>Set your password: </span><a href="{sp_link}">{sp_link}</a>'
         else:
@@ -1328,10 +1193,17 @@ def api_signature():
             attachments=attachments,
         )
     except Exception:
-        # não bloquear a confirmação por erro de envio de e-mail
         pass
 
-    sig_url = "/" + contract.signature_path.replace("\\", "/")
+    # URL da assinatura para retorno da API
+    if getattr(contract, "signature_blob", None) and blob_service and container_client:
+        try:
+            sig_url = make_sas_url(contract.signature_blob, minutes=30)
+        except Exception:
+            sig_url = None
+    else:
+        sig_rel = getattr(contract, "signature_path", None)
+        sig_url = ("/" + sig_rel.replace("\\", "/")) if sig_rel else None
 
     return jsonify({
         "ok": True,
@@ -1342,7 +1214,6 @@ def api_signature():
         "client_id": client.id,
         "contract_id": contract.id
     })
-
 
 
 @app.route("/set-password/<token>", methods=["GET", "POST"])
@@ -1379,7 +1250,6 @@ def set_password(token: str):
 def api_access_request():
     data = request.get_json(force=True) or {}
 
-    # 1) Resolve Client (lookup por nome; cria se não existir)
     company_name = (data.get("client_company") or "").strip()
     signer_email = (data.get("signer_email") or "").strip()
 
@@ -1389,9 +1259,8 @@ def api_access_request():
         if not client:
             client = Client(company_name=company_name, contact_email=signer_email)
             db.session.add(client)
-            db.session.flush()  # garante client.id
+            db.session.flush()
 
-    # 2) Salva assinatura caso tenha vindo como dataURL
     sig_relpath = None
     sig_data_url = data.get("signature_data_url") or ""
     if sig_data_url.startswith("data:image"):
@@ -1399,40 +1268,27 @@ def api_access_request():
             b64 = sig_data_url.split(",", 1)[1]
             raw = base64.b64decode(b64)
             fname = f"access_{uuid.uuid4().hex}.png"
-            abs_path = os.path.join(ACCESS_SIGS_DIR, fname)          # <<< usa a constante
+            abs_path = os.path.join(ACCESS_SIGS_DIR, fname)
             with open(abs_path, "wb") as f:
                 f.write(raw)
-            sig_relpath = f"uploads/access_signatures/{fname}"       # <<< caminho público
+            sig_relpath = f"uploads/access_signatures/{fname}"
         except Exception as e:
             return jsonify(ok=False, error=f"signature decode error: {e}"), 400
 
-
-    # 3) Monta kwargs aceitos pelo modelo (filtra por colunas válidas)
     allowed_cols = {c.name for c in AccessRequest.__table__.columns}
     kwargs = {}
-
-    # Copia somente chaves que existem na tabela
     for k, v in data.items():
         if k in allowed_cols:
             kwargs[k] = v
-
-    # Mapeia company -> client_id (se a coluna existir)
     if client and "client_id" in allowed_cols:
         kwargs["client_id"] = client.id
-
-    # Adiciona caminho da assinatura se a coluna existir
     if sig_relpath and "signature_path" in allowed_cols:
         kwargs["signature_path"] = sig_relpath
-
-    # Evita erro por campos que vieram do form e não existem no modelo
-    # (ex.: client_company, signature_data_url)
     kwargs.pop("client_company", None)
     kwargs.pop("signature_data_url", None)
 
     try:
         ar = AccessRequest(**kwargs)
-
-        # IP e autoria (defensivo, só seta se a coluna existir no modelo)
         ip = get_request_ip()
         if hasattr(ar, "submitted_ip"):
             ar.submitted_ip = ip
@@ -1443,7 +1299,6 @@ def api_access_request():
         if hasattr(ar, "submitted_email") and not ar.submitted_email:
             ar.submitted_email = (data.get("signer_email") or "").strip()
 
-
         db.session.add(ar)
         db.session.commit()
         return jsonify(ok=True, id=ar.id)
@@ -1451,6 +1306,8 @@ def api_access_request():
         db.session.rollback()
         return jsonify(ok=False, error=str(e)), 400
 
+
+from sqlalchemy.orm import joinedload
 
 @app.get("/admin/access/<int:ar_id>")
 @login_required
@@ -1462,9 +1319,9 @@ def admin_access_view(ar_id):
 @login_required
 def admin_access_pdf(ar_id):
     ar = AccessRequest.query.get_or_404(ar_id)
-    pdf_abs = _access_pdf_path(ar.id)
+    pdf_abs = _access_request_pdf_path(ar.id)
     if not os.path.exists(pdf_abs):
-        _generate_access_pdf(ar)
+        _generate_access_request_pdf(ar)
     return send_file(pdf_abs, as_attachment=True, download_name=f"access_{ar.id}.pdf")
 
 
@@ -1620,6 +1477,91 @@ def asset_detail(asset_id: int):
     )
 
 
+def notify_client_asset_needs_review(asset):
+    from models import Client
+    client = getattr(asset, "client", None) or Client.query.get(getattr(asset, "client_id", None))
+    to = (client.contact_email if client and client.contact_email else None) or _env("NOTIFY_TO")
+    if not to:
+        return False
+
+    bcc = _env("EMAIL_BCC")
+    link = _asset_public_review_link(asset)
+    subject = f"[4UIT] Asset awaiting your review: {asset.title or f'#{asset.id}'}"
+    html = f"""
+    <div style="font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:14px">
+      <p>Hello{(' ' + (client.company_name or '')) if client else ''},</p>
+      <p>There is a new item waiting for your approval:</p>
+      <p><strong>{asset.title or 'Asset'}</strong></p>
+      <p><a href="{link}" target="_blank" rel="noopener">Click here to review and approve</a></p>
+      <hr><p style="color:#6b7280">4UIT • Marketing & Software</p>
+    </div>
+    """
+    return send_mail_4uit(subject, html, to=to, bcc=bcc)
+
+
+def notify_team_asset_review_feedback(asset, review, action_label: str):
+    from models import Client
+    client = getattr(asset, "client", None) or Client.query.get(getattr(asset, "client_id", None))
+    to = None
+    if client and getattr(client, "account_manager_email", None):
+        to = client.account_manager_email
+    if not to:
+        to = _env("NOTIFY_TO")
+    if not to:
+        return False
+
+    bcc = _env("EMAIL_BCC")
+    link = _asset_public_review_link(asset)
+    subject = f"[4UIT] Client {action_label} • {asset.title or f'#{asset.id}'}"
+    comments = ""
+    if review and getattr(review, "comments", None):
+        comments = f"<p><strong>Client comments:</strong><br>{review.comments}</p>"
+
+    html = f"""
+    <div style="font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:14px">
+      <p><strong>Client:</strong> {(client.company_name if client else '-') }</p>
+      <p><strong>Action:</strong> {action_label}</p>
+      <p><strong>Asset:</strong> {asset.title or f'#{asset.id}'}</p>
+      {comments}
+      <p><a href="{link}" target="_blank" rel="noopener">Open asset</a></p>
+      <hr><p style="color:#6b7280">4UIT • Marketing & Software</p>
+    </div>
+    """
+    return send_mail_4uit(subject, html, to=to, bcc=bcc)
+
+
+def _asset_public_review_link(asset):
+    base = request.host_url.rstrip("/")
+    if getattr(asset, "public_token", None):
+        return f"{base}/review/{asset.public_token}"
+    return f"{base}{url_for('portal_asset_review', asset_id=asset.id)}"
+
+
+def send_mail_4uit(subject: str, html: str, to: list[str] | str,
+                   bcc: list[str] | str | None = None,
+                   text: str | None = None):
+    if isinstance(to, str):
+        to_list = [to]
+    else:
+        to_list = [t for t in to if t]
+
+    text_body = text or _html_to_text(html)
+    html_body = html or (text or "")
+
+    try:
+        return send_email(
+            subject=subject,
+            text_body=text_body,
+            html_body=html_body,
+            to_addrs=to_list,
+            cc_addrs=None,
+            attachments=None
+        )
+    except Exception as e:
+        current_app.logger.warning("send_mail_4uit: native send_email failed (%s). Falling back to SMTP.", e)
+        return _send_email_fallback(subject, html_body, to_list, bcc=bcc, text=text_body)
+
+
 @app.post("/assets/<int:asset_id>/send-review-email")
 @admin_required
 def assets_send_review_email(asset_id: int):
@@ -1677,7 +1619,7 @@ Thanks,
                 {escape(client.company_name) if client else '-'} • Status: <span style="border:1px solid #374151;border-radius:999px;padding:2px 8px">{escape(asset.status)}</span>
               </div>
               {("<div style='margin-bottom:16px'><img src='" + storage_url + "' style='max-width:100%;border-radius:12px;border:1px solid #1f2937'/></div>" if (storage_url and (asset.kind in ('image','copy'))) else "")}
-              <div style="margin:18px 0">
+              <div style='margin:18px 0'>
                 <a href="{review_url}" style="background:#0ea5e9;color:#001018;text-decoration:none;padding:10px 16px;border-radius:10px;display:inline-block;font-weight:700">Review & Approve/Reject</a>
               </div>
               {("<div style='font-size:12px;color:#9ca3af;margin-top:8px'>File: <a style='color:#93c5fd' href='" + storage_url + "'>" + storage_url + "</a></div>" if storage_url else "")}
@@ -1776,12 +1718,10 @@ def asset_upload():
             created_at=utcnow(),
             updated_at=utcnow(),
         )
-        # ensure a public token exists for one-click client review
         ensure_public_token(asset)
         db.session.add(asset)
         db.session.commit()
 
-        # >>> SEND EMAIL TO CLIENT: "asset awaiting review"
         try:
             sent = notify_client_asset_needs_review(asset)
             if sent is not False:
@@ -1790,7 +1730,6 @@ def asset_upload():
                 app.logger.warning("notify_client_asset_needs_review returned False (no recipient?) for asset #%s", asset.id)
         except Exception as e:
             app.logger.exception("Failed to send client review email for asset #%s: %s", asset.id, e)
-            # não bloqueia o fluxo do admin, apenas informa
             flash("Asset uploaded, but failed to send client notification email. Check SMTP/env and logs.", "warning")
 
         flash("Asset uploaded.", "success")
@@ -1894,12 +1833,8 @@ def clients_list():
         caret=caret,
     )
 
+
 def _build_onboarding_links(c: Client, external: bool = True) -> tuple[str, str]:
-    """
-    Retorna (contract_url, access_url)
-    - contract_url usa client_id (garante carregar override/template desse cliente)
-    - access_url vem pré-preenchido por conveniência
-    """
     contract_url = url_for("contract_page", _external=external, client_id=c.id)
     access_url = url_for("access_request_page", _external=external) + \
                  f"?company={quote(c.company_name or '')}&email={quote(c.contact_email or '')}"
@@ -1924,10 +1859,7 @@ def clients_new():
     db.session.add(c)
     db.session.commit()
     flash("Client added. Choose the contract template and click Save to send the onboarding e-mail.", "info")
-
-    # keep the current flow: go to the pref page; the POST there will send the email
     return redirect(url_for("client_contract_pref", client_id=c.id))
-
 
 
 @app.route("/clients/<int:client_id>/edit", methods=["GET", "POST"])
@@ -1957,10 +1889,8 @@ def clients_delete(client_id: int):
     c = Client.query.get_or_404(client_id)
     force = (request.args.get("force") == "1") or (request.form.get("force") == "1")
     try:
-        # 1) SEMPRE apaga a preferência 1-para-1 primeiro (evita NULL no FK)
         ClientContractPref.query.filter_by(client_id=c.id).delete(synchronize_session=False)
 
-        # 2) Se não for "forçado", bloqueia se existir vínculo em outras tabelas
         if not force:
             deps = {
                 "contracts": Contract.query.filter_by(client_id=c.id).count(),
@@ -1978,13 +1908,11 @@ def clients_delete(client_id: int):
                 )
                 return redirect(url_for("clients_list"))
 
-        # 3) Modo forçado: apaga todos os filhos
         if force:
             Contract.query.filter_by(client_id=c.id).delete(synchronize_session=False)
             Asset.query.filter_by(client_id=c.id).delete(synchronize_session=False)
             AccessRequest.query.filter_by(client_id=c.id).delete(synchronize_session=False)
 
-        # 4) Por fim, apaga o cliente
         db.session.delete(c)
         db.session.commit()
         flash("Cliente excluído.", "warning")
@@ -1993,6 +1921,7 @@ def clients_delete(client_id: int):
         flash(f"Erro ao excluir: {e}", "danger")
 
     return redirect(url_for("clients_list"))
+
 
 @app.get("/uploads/access_signatures/<path:filename>")
 def get_access_signature(filename):
@@ -2034,8 +1963,6 @@ def onboarding_page(token: str):
 # -------------------------------------------------
 # Admin (protected)
 # -------------------------------------------------
-from sqlalchemy.orm import joinedload
-
 @app.get("/admin")
 @login_required
 def admin_home():
@@ -2052,7 +1979,7 @@ def admin_home():
 @admin_required
 def admin_contract_view(contract_id: int):
     c = Contract.query.get_or_404(contract_id)
-    pdf_abs = _generate_contract_pdf(c)  # tenta gerar (se ReportLab disponível)
+    pdf_abs = _generate_contract_pdf(c)
     pdf_exists = bool(pdf_abs and os.path.exists(pdf_abs))
     return render_template("admin_contract_view.html", contract=c, pdf_exists=pdf_exists)
 
@@ -2060,8 +1987,6 @@ def admin_contract_view(contract_id: int):
 @admin_required
 def admin_contract_pdf(contract_id: int):
     cn = Contract.query.get_or_404(contract_id)
-
-    # Usa exatamente o mesmo gerador do portal do cliente
     pdf_abs = _generate_contract_pdf(cn)
 
     if not (pdf_abs and os.path.exists(pdf_abs)):
@@ -2073,12 +1998,16 @@ def admin_contract_pdf(contract_id: int):
         as_attachment=True,
         download_name=f"4UIT-contract-{cn.id}.pdf"
     )
+
+
 # -------------------------------------------------
 # Static for uploads
 # -------------------------------------------------
 @app.get("/uploads/signatures/<path:filename>")
 def get_signature(filename):
-    return send_from_directory(UPLOAD_SIGS_DIR, filename)
+    # compat: servir da pasta persistente
+    abs_dir = UPLOAD_SIGS_DIR
+    return send_from_directory(abs_dir, filename)
 
 
 @app.get("/uploads/assets/<path:filename>")
@@ -2121,18 +2050,15 @@ def public_review_decision(token):
     if decision not in ("approve", "reject"):
         return render_template_string("<p class='error'>Invalid decision.</p>"), 400
 
-    # Parse schedule (ISO 8601)
     scheduled_dt = None
     if scheduled_for_raw:
         try:
             scheduled_dt = datetime.fromisoformat(scheduled_for_raw)
             if scheduled_dt.tzinfo is None:
-                # Assume UTC if user forgot timezone
                 scheduled_dt = scheduled_dt.replace(tzinfo=timezone.utc)
         except Exception:
             scheduled_dt = None
 
-    # Reject requires a comment
     if decision == "reject" and not comment:
         storage_url = f"/{asset.storage_path}" if asset.storage_path else None
         thumb_url = f"/{asset.thumbnail_path}" if asset.thumbnail_path else None
@@ -2145,7 +2071,6 @@ def public_review_decision(token):
             error="Please add a comment to explain the rejection."
         ), 400
 
-    # Apply decision
     if decision == "approve":
         asset.status = "approved"
         asset.approved_at = utcnow()
@@ -2159,10 +2084,9 @@ def public_review_decision(token):
     if scheduled_dt:
         asset.scheduled_for = scheduled_dt
 
-    # Always touch updated_at and commit (bug fix: commit was inside the schedule block)
     asset.updated_at = utcnow()
     try:
-        db.session.flush()   # ensure UPDATE hits before commit
+        db.session.flush()
         db.session.commit()
         db.session.refresh(asset)
         app.logger.info("Asset #%s marked as %s by public review", asset.id, asset.status)
@@ -2171,21 +2095,16 @@ def public_review_decision(token):
         app.logger.exception("Failed to persist public decision for asset #%s: %s", asset.id, e)
         return render_template_string("<p class='error'>Could not save your decision. Please try again.</p>"), 500
 
-    # --- Notify team about client's decision (approve/reject), including comment ---
     try:
         action_label = "approved" if decision == "approve" else "rejected"
-
-        # lightweight adapter so notify_* can read "comments"
         class _Review: ...
         review = _Review()
         review.comments = comment or None
-
         notify_team_asset_review_feedback(asset, review, action_label)
     except Exception as e:
         app.logger.warning("public_review_decision: notify_team_asset_review_feedback failed: %s", e)
 
     return render_template("review_confirmation.html", asset=asset)
-
 
 
 # ============================
@@ -2315,7 +2234,6 @@ def client_contract_pref(client_id: int):
         pref.override_text = override_text
         db.session.commit()
 
-        # ---- Send onboarding email right after saving ----
         to = (c.contact_email or "").strip()
         if to:
             brand = "4UIT Solutions"
@@ -2352,7 +2270,6 @@ Thank you,
             </div>
             """
 
-            # CC admins/notify list if configured
             cc_list = _split_emails(os.getenv("ADMIN_EMAIL")) or _split_emails(os.getenv("NOTIFY_TO")) or None
             try:
                 send_email(subject, text_body, html_body, to_addrs=[to], cc_addrs=cc_list, attachments=None)
@@ -2363,7 +2280,6 @@ Thank you,
         else:
             flash("Preference saved. No e-mail sent (client has no contact_email).", "warning")
 
-        # After sending, go back to clients list (clear the modal feeling)
         return redirect(url_for("clients_list"))
 
     share_url = url_for("contract_page", client_id=c.id, _external=True)
@@ -2374,7 +2290,6 @@ Thank you,
         templates=templates,
         share_url=share_url,
     )
-
 
 
 # --- Helpers de vínculo cliente-usuário ---
@@ -2397,7 +2312,7 @@ def portal_contracts():
     contracts = []
     access_last = None
     access_count = 0
-    access_rows = []  # histórico
+    access_rows = []
     access_prefill = url_for("access_request_page")
 
     if client:
@@ -2478,7 +2393,7 @@ def portal_access_pdf(ar_id: int):
         abort(403)
     path = _access_pdf_path(ar.id)
     if not os.path.exists(path):
-        _generate_access_pdf(ar)
+        _generate_access_request_pdf(ar)
     return send_file(path, as_attachment=True, download_name=f"access-{ar.id}.pdf")
 
 
@@ -2486,24 +2401,14 @@ def portal_access_pdf(ar_id: int):
 # Portal — Asset Review (única definição)
 # ======================
 def _resolve_user_client_id():
-    """
-    Tenta descobrir o client_id do usuário logado pelas vias:
-    1) user.client_id (campo direto)
-    2) user.client (relationship)
-    3) e-mail do usuário batendo com contact_email OU account_manager_email do Client
-    """
     cid = getattr(current_user, "client_id", None)
     if cid:
         return cid
-
-    # relationship opcional: user.client
     if hasattr(current_user, "client") and getattr(current_user, "client", None):
         try:
             return current_user.client.id
         except Exception:
             pass
-
-    # fallback por e-mail
     user_email = getattr(current_user, "email", None)
     if user_email:
         c = Client.query.filter(
@@ -2514,32 +2419,22 @@ def _resolve_user_client_id():
         ).first()
         if c:
             return c.id
-
     return None
 
-def _client_asset_for_user(asset_id: int):
-    """
-    Retorna (client, asset) se o usuário tiver acesso.
-    - Admin pode ver tudo
-    - Usuário do portal só vê assets do próprio client.
-    """
-    asset = Asset.query.get_or_404(asset_id)
 
-    # Admin vê tudo
+def _client_asset_for_user(asset_id: int):
+    asset = Asset.query.get_or_404(asset_id)
     if getattr(current_user, "role", None) == "admin":
         client = asset.client if hasattr(asset, "client") else Client.query.get(asset.client_id)
         return client, asset
-
-    # Portal user precisa bater client_id
     user_client_id = _resolve_user_client_id()
     if not user_client_id:
         abort(403)
-
     if asset.client_id != user_client_id:
         abort(403)
-
     client = asset.client if hasattr(asset, "client") else Client.query.get(user_client_id)
     return client, asset
+
 
 @app.get("/portal/assets/<int:asset_id>/review")
 @login_required
@@ -2568,6 +2463,7 @@ def portal_asset_review(asset_id: int):
                            a=asset,
                            preview_url=preview_url,
                            reviews=reviews)
+
 
 @app.post("/portal/assets/<int:asset_id>/review")
 @login_required
@@ -2608,28 +2504,22 @@ def portal_asset_review_submit(asset_id: int):
     asset.status = rev.status
     db.session.commit()
 
-    # --- notify team about client's portal feedback (approve/changes/reject) ---
     try:
-        # map back to a human label for the email subject/body
         action_map = {
             "approved": "approved",
             "changes_requested": "changes requested",
             "rejected": "rejected",
         }
         action_label = action_map.get(rev.status, rev.status)
-
-        # lightweight adapter so notify_* can read "comments"
         class _Review: ...
         review = _Review()
         review.comments = note or None
-
         notify_team_asset_review_feedback(asset, review, action_label)
     except Exception as e:
         app.logger.warning("portal_asset_review_submit: notify_team_asset_review_feedback failed: %s", e)
 
     flash("Feedback submitted. Thank you!", "success")
     return redirect(url_for("portal_asset_review", asset_id=asset.id))
-
 
 
 # -------------------------------------------------

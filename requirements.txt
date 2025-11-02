@@ -11,5 +11,7 @@ SQLAlchemy==2.0.35
 gunicorn==23.0.0
 Werkzeug==3.0.4
 itsdangerous==2.2.0
+azure-identity==1.17.1
+azure-storage-blob==12.20.0
 
 

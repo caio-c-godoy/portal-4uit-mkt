@@ -33,7 +33,13 @@ class Contract(db.Model):
     signed_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     signer_ip = db.Column(db.String(64))
     user_agent = db.Column(db.Text)
+
+    # LEGADO (local): continua funcionando
     signature_path = db.Column(db.String(255))
+
+    # NOVO (Blob): usado quando Azure estiver configurado
+    signature_blob = db.Column(db.String(512))  # ex.: 'signatures/uuid.png'
+
     contract_text = db.Column(db.Text)
 
     client = relationship("Client", backref="contracts")

@@ -8,7 +8,7 @@ from markupsafe import Markup, escape
 from urllib.parse import urlencode, quote
 import json
 from flask import current_app
-from werkzeug.utils import safe_join
+
 
 
 from io import BytesIO

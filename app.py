@@ -8,7 +8,8 @@ from markupsafe import Markup, escape
 from urllib.parse import urlencode, quote
 import json
 from flask import current_app
-from flask import safe_join
+from werkzeug.utils import safe_join
+
 
 from io import BytesIO
 from reportlab.lib.units import inch
@@ -989,6 +990,7 @@ def inject_blob_helpers():
     return {"make_sas_url": make_sas_url if (blob_service and container_client) else lambda *a, **k: ""}
 
 
+
 # -------------------------------------------------
 # Util
 # -------------------------------------------------
@@ -1001,6 +1003,15 @@ def admin_assets_ensure_tokens():
     db.session.commit()
     return jsonify({"ok": True, "updated": len(missing)})
 
+@app.route("/uploads/<path:filename>")
+def serve_uploads(filename):
+    # raiz onde você guarda os arquivos
+    upload_root = os.path.join(app.root_path, "uploads")
+    full_path = safe_join(upload_root, filename)  # <- agora do werkzeug
+    if not full_path or not os.path.isfile(full_path):
+        abort(404)
+    # define mimetype opcionalmente
+    return send_file(full_path)
 
 # -------------------------------------------------
 # Public pages

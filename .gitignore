@@ -1,0 +1,26 @@
+﻿# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Venv
+.venv/
+venv/
+
+# Flask
+instance/
+uploads/
+
+# Secrets
+.env
+
+# OS
+Thumbs.db
+.DS_Store
+
+# VSCode
+.vscode/
+
+# Build
+dist/
+build/

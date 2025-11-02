@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% set title = "Contract Detail — 4UIT" %}
+{% set heading = "Contract detail" %}
+{% set subheading = client.company_name if client else '-' %}
+
+{% block content %}
+<div class="card">
+  <div class="grid" style="grid-template-columns:1fr 1fr;gap:12px">
+    <div>
+      <div class="muted">Signer</div>
+      <div><strong>{{ contract.signer_name or '-' }}</strong></div>
+
+      <div class="muted" style="margin-top:8px">E-mail</div>
+      <div>{{ contract.signer_email or '-' }}</div>
+
+      <div class="muted" style="margin-top:8px">Signed (UTC)</div>
+      <div>{{ contract.signed_at.isoformat() if contract.signed_at else '-' }}</div>
+
+      <div class="muted" style="margin-top:8px">IP</div>
+      <div>{{ contract.signer_ip or '-' }}</div>
+
+      <div class="muted" style="margin-top:8px">User-Agent</div>
+      <div class="muted" style="font-size:12px;white-space:pre-wrap">{{ contract.user_agent or '-' }}</div>
+
+      <div style="display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap">
+        <a class="btn" href="{{ url_for('contract_pdf', contract_id=contract.id) }}">Download PDF</a>
+        <a class="btn btn-ghost" href="{{ url_for('admin_panel') }}">Back</a>
+      </div>
+    </div>
+
+    <div>
+      <div class="muted">Signature</div>
+      {% if signature_url %}
+        <img src="{{ signature_url }}" alt="Signature" style="max-width:100%;border:1px solid var(--ff-border);border-radius:12px"/>
+      {% else %}
+        <div class="muted">No signature image.</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div class="card" style="margin-top:12px">
+  <div class="muted" style="margin-bottom:6px">Contract text (snapshot)</div>
+  <div style="white-space:pre-wrap;line-height:1.55">{{ contract.contract_text or '— No contract text stored —' }}</div>
+</div>
+
+{% if not pdf_available %}
+  <div class="alert warning" style="margin-top:12px">
+    PDF not available on this server. Install <code>reportlab</code>: <code>pip install reportlab</code>.
+  </div>
+{% endif %}
+{% endblock %}

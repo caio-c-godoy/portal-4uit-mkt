@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Admin — Contract #{{ contract.id }}{% endblock %}
+{% set heading = "Contract #" ~ contract.id %}
+{% set subheading = (contract.client.company_name if contract.client else "—") ~ " • " ~ (contract.signer_name or "") %}
+
+{% block extra_head %}
+<style>
+  .card{background:var(--ff-card,#0f172a);border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:16px}
+  .grid{display:grid;gap:16px;grid-template-columns:1fr 1fr}
+  @media (max-width: 980px){ .grid{ grid-template-columns:1fr } }
+  .muted{color:#94a3b8}
+  pre.contract{white-space:pre-wrap;line-height:1.5;background:rgba(255,255,255,.03);padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.06);max-height:60vh;overflow:auto}
+  .meta-list{margin:0;padding:0;list-style:none}
+  .meta-list li{padding:8px 0;border-bottom:1px dashed rgba(255,255,255,.08)}
+  .meta-list li:last-child{border-bottom:0}
+  .actions{display:flex;gap:10px;flex-wrap:wrap}
+</style>
+{% endblock %}
+
+{% block page_actions %}
+  <a class="btn" href="{{ url_for('admin_panel') }}">← Voltar</a>
+  {% if pdf_exists %}
+    <a class="btn btn-primary" href="{{ url_for('admin_contract_pdf', contract_id=contract.id) }}">Baixar PDF</a>
+  {% else %}
+    <a class="btn btn-primary" href="{{ url_for('admin_contract_pdf', contract_id=contract.id) }}">Gerar/baixar PDF</a>
+  {% endif %}
+{% endblock %}
+
+{% block content %}
+<div class="grid">
+  <section class="card">
+    <h3 style="margin-top:0">Detalhes</h3>
+    <ul class="meta-list">
+      <li><strong>Cliente:</strong> {{ contract.client.company_name if contract.client else "—" }}</li>
+      <li><strong>Signer:</strong> {{ contract.signer_name or "—" }} &lt;{{ contract.signer_email or "—" }}&gt;</li>
+      <li><strong>Assinado (UTC):</strong> {{ contract.signed_at.isoformat() if contract.signed_at else "—" }}</li>
+      <li><strong>IP:</strong> {{ contract.signer_ip or "—" }}</li>
+      <li><strong>User-Agent:</strong> <span class="muted">{{ contract.user_agent or "—" }}</span></li>
+      <li>
+        <strong>Assinatura:</strong>
+        {% if contract.signature_path %}
+          <div style="margin-top:8px">
+            <img src="/{{ contract.signature_path }}" alt="signature" style="max-width:100%;border-radius:10px;border:1px solid rgba(255,255,255,.08)"/>
+          </div>
+        {% else %}
+          —
+        {% endif %}
+      </li>
+    </ul>
+    <div class="actions" style="margin-top:12px">
+      <a class="btn btn-ghost" href="{{ url_for('admin_contract_pdf', contract_id=contract.id) }}">Gerar/baixar PDF</a>
+    </div>
+  </section>
+
+  <section class="card">
+    <h3 style="margin-top:0">Texto do contrato</h3>
+    <pre class="contract">{{ contract.contract_text or "—" }}</pre>
+  </section>
+</div>
+{% endblock %}

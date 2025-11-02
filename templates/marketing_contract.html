@@ -1,0 +1,171 @@
+{% extends "base.html" %}
+{% set title = "Contract — 4UIT" %}
+{% set heading = "Service Agreement" %}
+{% set subheading = "Please review and sign" %}
+
+{% block content %}
+<div class="card" style="max-width:900px;margin:0 auto">
+  <form id="contractForm" class="p-3 p-md-4">
+    <!-- Company -->
+    <label class="ff-label">Company</label>
+    <input class="ff-input" name="client_company" value="{{ prefill_company or '' }}" required />
+
+    <!-- Signer -->
+    <label class="ff-label mt-3">Signer name</label>
+    <input class="ff-input" name="signer_name" required />
+
+    <label class="ff-label mt-3">Signer e-mail</label>
+    <input class="ff-input" type="email" name="signer_email" value="{{ prefill_email or '' }}" required />
+
+    <!-- Contract text -->
+    <label class="ff-label mt-3">Contract</label>
+    <textarea class="ff-input" name="contract_text" rows="12" required>{{ contract_text }}</textarea>
+
+    <!-- Signature -->
+    <div class="mt-3">
+      <label class="ff-label">Draw your signature below:</label>
+      <canvas id="sigCanvas"
+              style="width:100%;height:220px;border:1px dashed #cbd5e1;
+                     border-radius:8px;background:#ffffff;touch-action:none;"></canvas>
+      <input type="hidden" name="signature_data_url" id="sigData">
+    </div>
+
+    <!-- Actions -->
+    <div class="d-flex align-items-center gap-2 mt-3">
+      <button type="button" class="btn btn-light border" id="sigClear">Clear</button>
+      <button type="submit" class="btn btn-primary" id="submitBtn">
+        <span class="submit-label">Sign &amp; Submit</span>
+        <span class="spinner-border spinner-border-sm ms-2 d-none" role="status" aria-hidden="true"></span>
+      </button>
+      <small id="formHint" class="text-muted ms-2"></small>
+    </div>
+  </form>
+</div>
+
+<script>
+(() => {
+  // -------- Signature canvas ----------
+  const canvas   = document.getElementById('sigCanvas');
+  const hidden   = document.getElementById('sigData');
+  const clearBtn = document.getElementById('sigClear');
+  const form     = document.getElementById('contractForm');
+  const submitBtn= document.getElementById('submitBtn');
+  const spinner  = submitBtn.querySelector('.spinner-border');
+  const labelEl  = submitBtn.querySelector('.submit-label');
+  const hintEl   = document.getElementById('formHint');
+  const ctx      = canvas.getContext('2d');
+
+  let drawing = false;
+
+  function setupCtx() {
+    ctx.lineWidth   = 2;
+    ctx.lineJoin    = 'round';
+    ctx.lineCap     = 'round';
+    ctx.strokeStyle = '#111827';
+  }
+
+  function resizeCanvas() {
+    const ratio = Math.max(window.devicePixelRatio || 1, 1);
+    const w  = canvas.clientWidth;
+    const h  = canvas.clientHeight;
+    if (!w || !h) return;
+    canvas.width  = Math.floor(w * ratio);
+    canvas.height = Math.floor(h * ratio);
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    setupCtx();
+  }
+
+  function getPos(e) {
+    const rect = canvas.getBoundingClientRect();
+    const src  = e.touches ? e.touches[0] : e;
+    return { x: src.clientX - rect.left, y: src.clientY - rect.top };
+  }
+
+  function start(e) { e.preventDefault(); drawing = true; const p = getPos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); }
+  function move(e)  { if (!drawing) return; e.preventDefault(); const p = getPos(e); ctx.lineTo(p.x, p.y); ctx.stroke(); }
+  function end(e)   { if (!drawing) return; e.preventDefault(); drawing = false; }
+
+  canvas.addEventListener('mousedown', start);
+  canvas.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', end);
+
+  canvas.addEventListener('touchstart', start, { passive:false });
+  canvas.addEventListener('touchmove',  move,  { passive:false });
+  canvas.addEventListener('touchend',   end);
+
+  clearBtn.addEventListener('click', (e) => { e.preventDefault(); resizeCanvas(); hidden.value=''; });
+
+  // init
+  resizeCanvas();
+  window.addEventListener('resize', resizeCanvas);
+
+  // -------- Submit handling ----------
+  function setSubmitting(v){
+    submitBtn.disabled = v;
+    spinner.classList.toggle('d-none', !v);
+  }
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    hintEl.textContent = '';
+
+    // Verifica se a assinatura está vazia
+    const blank = document.createElement('canvas');
+    blank.width = canvas.width; blank.height = canvas.height;
+    if (canvas.toDataURL() === blank.toDataURL()) {
+      hintEl.textContent = 'Please draw your signature.';
+      hintEl.classList.remove('text-success'); hintEl.classList.add('text-danger');
+      return;
+    }
+    // Prepara o data URL
+    hidden.value = canvas.toDataURL('image/png');
+
+    // Coleta campos
+    const fd = new FormData(form);
+    const payload = {
+      client_company:  (fd.get('client_company') || '').trim(),
+      signer_name:     (fd.get('signer_name') || '').trim(),
+      signer_email:    (fd.get('signer_email') || '').trim(),
+      contract_text:   (fd.get('contract_text') || '').trim(),
+      signature_data_url: fd.get('signature_data_url')
+    };
+
+    // Valida mínimos
+    if (!payload.client_company || !payload.signer_name || !payload.signer_email || !payload.contract_text) {
+      hintEl.textContent = 'Please fill all required fields.';
+      hintEl.classList.remove('text-success'); hintEl.classList.add('text-danger');
+      return;
+    }
+
+    try {
+      setSubmitting(true);
+      const res = await fetch('/api/signature', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        credentials: 'same-origin'
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || ('HTTP ' + res.status));
+      }
+
+      // sucesso
+      hintEl.textContent = 'Signed successfully! A copy was sent to your e-mail.';
+      hintEl.classList.remove('text-danger'); hintEl.classList.add('text-success');
+
+      // opcional: redirecionar para o portal do cliente
+      setTimeout(() => { window.location.href = '/portal'; }, 1200);
+
+    } catch (err) {
+      hintEl.textContent = 'Failed to submit: ' + (err && err.message ? err.message : err);
+      hintEl.classList.remove('text-success'); hintEl.classList.add('text-danger');
+    } finally {
+      setSubmitting(false);
+    }
+  });
+})();
+</script>
+{% endblock %}

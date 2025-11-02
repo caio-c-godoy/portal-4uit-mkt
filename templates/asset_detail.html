@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% set title = "Asset Detail — 4UIT" %}
+{% set heading = "Asset detail" %}
+{% set subheading = a.title %}
+
+{% block content %}
+<div class="card">
+  <div class="grid" style="grid-template-columns:1fr 1fr;gap:12px">
+    <div>
+      <div class="muted">Client</div>
+      <div>{{ a.client.company_name if a.client else '-' }}</div>
+
+      <div class="muted" style="margin-top:8px">Kind / Status</div>
+      <div>{{ a.kind }} • <span class="pill">{{ a.status }}</span></div>
+
+      {% if a.description %}
+      <div class="muted" style="margin-top:8px">Description</div>
+      <div style="white-space:pre-wrap">{{ a.description }}</div>
+      {% endif %}
+
+      {% if a.external_url %}
+      <div class="muted" style="margin-top:8px">External</div>
+      <div><a class="link" href="{{ a.external_url }}" target="_blank" rel="noopener">{{ a.external_url }}</a></div>
+      {% endif %}
+
+      <div class="muted" style="margin-top:8px">Review link</div>
+      <div>
+        <input value="{{ review_url }}" style="width:100%" readonly />
+      </div>
+    </div>
+
+    <div>
+      <div class="muted">Preview</div>
+      {% if preview_url %}
+        {% if a.kind in ('image','copy') %}
+          <img src="{{ preview_url }}" alt="" style="max-width:100%;border:1px solid var(--ff-border);border-radius:12px"/>
+        {% else %}
+          <a class="btn" href="{{ preview_url }}" target="_blank">Open file</a>
+        {% endif %}
+      {% else %}
+        <div class="muted">No file uploaded.</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div class="card" style="margin-top:12px">
+  <form method="post" action="{{ url_for('assets_send_review_email', asset_id=a.id) }}" class="grid" style="grid-template-columns:1fr 1fr 140px; gap:8px; align-items:end">
+    <div>
+      <label class="ff-label">To</label>
+      <input class="ff-input" name="to" type="email" value="{{ default_to }}">
+    </div>
+    <div>
+      <label class="ff-label">CC</label>
+      <input class="ff-input" name="cc" type="text" value="{{ default_cc }}">
+    </div>
+    <div>
+      <label class="ff-label">Attach file?</label>
+      <select class="ff-input" name="attach">
+        <option value="0">No</option>
+        <option value="1">Yes</option>
+      </select>
+    </div>
+    <div style="grid-column:1 / -1">
+      <button class="btn">Send review email</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

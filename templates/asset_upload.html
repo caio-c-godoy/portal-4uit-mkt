@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% set title = "Upload Asset — 4UIT" %}
+{% set heading = "Upload Asset" %}
+{% set subheading = "Submit an asset for client approval" %}
+
+{% block content %}
+<form method="post" enctype="multipart/form-data" class="card" style="max-width:720px;margin:0 auto">
+  <label class="ff-label">Client</label>
+  <select class="ff-input" name="client_id" required>
+    <option value="">Select...</option>
+    {% for c in clients %}
+    <option value="{{ c.id }}">{{ c.company_name }}</option>
+    {% endfor %}
+  </select>
+
+  <label class="ff-label">Title</label>
+  <input class="ff-input" type="text" name="title" placeholder="e.g., Carousel – Promo Mattress" required>
+
+  <label class="ff-label">Description</label>
+  <textarea class="ff-input" name="description" rows="3" placeholder="Context or copy..."></textarea>
+
+  <label class="ff-label">Kind</label>
+  <select class="ff-input" name="kind">
+    {% for k in ["image","video","copy","ad","other"] %}
+    <option value="{{k}}">{{k}}</option>
+    {% endfor %}
+  </select>
+
+  <label class="ff-label">External URL (optional)</label>
+  <input class="ff-input" type="url" name="external_url" placeholder="Figma/Drive/Loom...">
+
+  <label class="ff-label">File (optional)</label>
+  <input class="ff-input" type="file" name="file" accept=".png,.jpg,.jpeg,.gif,.webp,.mp4,.mov,.mkv,.pdf">
+
+  <div style="display:flex;gap:8px;margin-top:10px">
+    <button class="btn" type="submit">Upload</button>
+    <a class="btn btn-ghost" href="{{ url_for('assets_list') }}">Back</a>
+  </div>
+</form>
+{% endblock %}

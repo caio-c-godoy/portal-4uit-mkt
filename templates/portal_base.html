@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>{{ title or "4UIT Portal" }}</title>
+  <link href="{{ url_for('static', filename='css/styles.css') }}" rel="stylesheet">
+  {% block extra_head %}{% endblock %}
+  <style>
+    .portal-wrap{max-width:1200px;margin:0 auto;padding:26px 16px}
+    .portal-nav{position:sticky;top:0;z-index:50;background:var(--ff-bg,#0b1220);
+      border-bottom:1px solid var(--ff-border,rgba(255,255,255,.08))}
+    .portal-nav .bar{max-width:1200px;margin:0 auto;padding:12px 16px;
+      display:flex;gap:14px;align-items:center;justify-content:space-between}
+    .brand{display:flex;gap:10px;align-items:center;font-weight:700}
+    .brand img{height:22px;width:auto;border-radius:4px}
+    .navlinks{display:flex;gap:8px;align-items:center}
+    .navlinks a{padding:8px 10px;border-radius:10px;text-decoration:none;
+      color:var(--ff-ink,#e5e7eb)}
+    .navlinks a.active{background:rgba(255,255,255,.08);color:#fff}
+    .footer{border-top:1px solid var(--ff-border,rgba(255,255,255,.08));margin-top:36px;padding:18px 0;font-size:12px;color:var(--ff-muted,#9ca3af)}
+    .h3{font-size:clamp(22px,3.2vw,30px);font-weight:800;margin:0}
+    .h5{font-size:clamp(16px,2.2vw,18px);font-weight:700;margin:0}
+  </style>
+</head>
+<body>
+  <header class="portal-nav">
+    <div class="bar">
+      <div class="brand">
+        <img src="{{ url_for('static', filename='img/4uit.png') }}" alt="4UIT">
+        <span>4UIT Portal</span>
+      </div>
+      <nav class="navlinks">
+        <a href="{{ url_for('portal_contracts') }}"
+           class="{{ 'active' if portal_active=='contracts' else '' }}">Agreements</a>
+        <a href="{{ url_for('portal_assets') }}"
+           class="{{ 'active' if portal_active=='assets' else '' }}">Assets</a>
+        <a href="{{ url_for('logout') }}">Sign out</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="portal-wrap">
+    {% if heading %}
+      <h1 class="h3">{{ heading }}</h1>
+      {% if subheading %}<div class="muted" style="margin:4px 0 16px">{{ subheading }}</div>{% endif %}
+    {% endif %}
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for cat, msg in messages %}
+          <div class="alert {{ cat }}">{{ msg|safe }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    {% block content %}{% endblock %}
+    <div class="footer">4UIT Solutions LLC • 7362 Futures Dr, Bay 15, Orlando, FL 32819</div>
+  </main>
+</body>
+</html>

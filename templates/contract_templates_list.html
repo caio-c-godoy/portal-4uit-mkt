@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% set title = "Contract Templates — 4UIT" %}
+{% set heading = "Contract templates" %}
+{% set subheading = "Create / Edit / Default" %}
+
+{% block content %}
+<div class="card">
+  <form method="post" class="grid" style="grid-template-columns:1fr;gap:8px">
+    <label class="ff-label">Name</label>
+    <input class="ff-input" name="name" required>
+
+    <label class="ff-label">Body</label>
+    <textarea class="ff-input" name="body" rows="10" required></textarea>
+
+    <label class="ff-label">Set as default?</label>
+    <label><input type="checkbox" name="is_default" value="1"> Yes</label>
+
+    <div><button class="btn">Create</button></div>
+  </form>
+</div>
+
+<div class="card" style="margin-top:12px;padding:0">
+  <div style="overflow:auto">
+    <table>
+      <thead><tr><th>#</th><th>Name</th><th>Default</th><th>Updated</th><th>Actions</th></tr></thead>
+      <tbody>
+        {% for t in templates %}
+        <tr>
+          <td>{{ t.id }}</td>
+          <td>{{ t.name }}</td>
+          <td>{{ 'Yes' if t.is_default else 'No' }}</td>
+          <td>{{ t.updated_at or '-' }}</td>
+          <td style="white-space:nowrap">
+            <a class="btn btn-ghost" href="{{ url_for('contract_templates_edit', tpl_id=t.id) }}">Edit</a>
+            <form method="post" action="{{ url_for('contract_templates_delete', tpl_id=t.id) }}" style="display:inline" onsubmit="return confirm('Delete template?')">
+              <button class="btn" style="background:#dc2626">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+        {% if not templates %}
+        <tr><td colspan="5" class="muted" style="padding:12px">No templates.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

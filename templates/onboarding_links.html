@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% set title = "Onboarding Links — 4UIT" %}
+{% set heading = "Onboarding links" %}
+{% set subheading = c.company_name %}
+
+{% block content %}
+<div class="card">
+  <div class="muted" style="margin-bottom:6px">Send these links to the client:</div>
+  <div style="display:grid;gap:8px">
+    <div><strong>Contract:</strong> <a class="link" href="{{ contract_url }}" target="_blank">{{ contract_url }}</a></div>
+    <div><strong>Access Request:</strong> <a class="link" href="{{ access_url }}" target="_blank">{{ access_url }}</a></div>
+    <div><strong>One-click Onboarding:</strong> <a class="link" href="{{ onboarding_url }}" target="_blank">{{ onboarding_url }}</a></div>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% set title = "Sign in — 4UIT" %}
+{% set heading = "Sign in" %}
+{% set subheading = "Admin & Client portal" %}
+
+{% block content %}
+<form method="post" class="card" style="max-width:460px;margin:0 auto">
+  <input type="hidden" name="next" value="{{ next or '' }}">
+  <label class="ff-label">E-mail</label>
+  <input class="ff-input" name="email" type="email" required>
+
+  <label class="ff-label">Password</label>
+  <input class="ff-input" name="password" type="password" required>
+
+  <label class="ff-label"><input type="checkbox" name="remember" value="1"> Remember me</label>
+
+  <div style="margin-top:10px"><button class="btn">Sign in</button></div>
+</form>
+{% endblock %}

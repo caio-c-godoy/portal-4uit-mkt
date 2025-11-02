@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% set title = "4UIT Portal" %}
+{% set heading = "4UIT Portal" %}
+{% set subheading = "Marketing & Client Approvals" %}
+
+{% block content %}
+<div class="card">
+  <p>Welcome to 4UIT Portal.</p>
+  <p><a class="btn" href="{{ url_for('login') }}">Sign in</a></p>
+</div>
+{% endblock %}

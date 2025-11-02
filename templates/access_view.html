@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% set title = "Access Request — Admin" %}
+{% set heading = "Access request" %}
+{% set subheading = "Details & signature" %}
+
+{% block content %}
+<div class="card" style="max-width:1000px;margin:0 auto;padding:0">
+  <div style="padding:14px 16px;border-bottom:1px solid var(--ff-border)">
+    <div class="muted" style="font-size:13px">ID #{{ ar.id }}</div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <div><strong>Client:</strong> {{ ar.client.company_name if ar.client else '-' }}</div>
+      <div class="muted">•</div>
+      <div><strong>Submitted (UTC):</strong> {{ ar.submitted_at.isoformat() if ar.submitted_at else '-' }}</div>
+      <div class="muted">•</div>
+      <div><strong>IP:</strong> {{ ar.signer_ip or '-' }}</div>
+      <div class="muted">•</div>
+      <div><strong>By:</strong> {{ ar.signer_name or '-' }} &lt;{{ ar.signer_email or '-' }}&gt;</div>
+    </div>
+  </div>
+
+  <div style="padding:16px">
+    <h4 style="margin:0 0 10px">Provided access info</h4>
+
+    <div class="grid" style="grid-template-columns:1fr 1fr;gap:12px">
+      <div>
+        <label class="ff-label">Instagram (user)</label>
+        <input class="ff-input" value="{{ ar.instagram_user or '' }}" readonly>
+      </div>
+      <div>
+        <label class="ff-label">Facebook Page</label>
+        <input class="ff-input" value="{{ ar.facebook_page or '' }}" readonly>
+      </div>
+
+      <div>
+        <label class="ff-label">Meta BM ID</label>
+        <input class="ff-input" value="{{ ar.meta_bm_id or '' }}" readonly>
+      </div>
+      <div>
+        <label class="ff-label">Meta Ads Account</label>
+        <input class="ff-input" value="{{ ar.meta_ads_account_id or '' }}" readonly>
+      </div>
+
+      <div>
+        <label class="ff-label">Google Ads ID</label>
+        <input class="ff-input" value="{{ ar.google_ads_id or '' }}" readonly>
+      </div>
+      <div>
+        <label class="ff-label">Website URL</label>
+        <input class="ff-input" value="{{ ar.website_url or '' }}" readonly>
+      </div>
+
+      <div>
+        <label class="ff-label">Hosting</label>
+        <input class="ff-input" value="{{ ar.hosting or '' }}" readonly>
+      </div>
+      <div>
+        <label class="ff-label">Hosting Login</label>
+        <input class="ff-input" value="{{ ar.hosting_login or '' }}" readonly>
+      </div>
+      <div>
+        <label class="ff-label">Hosting Password</label>
+        <input class="ff-input" value="{{ ar.hosting_password or '' }}" readonly>
+      </div>
+
+      <div>
+        <label class="ff-label">Domain Registrar</label>
+        <input class="ff-input" value="{{ ar.domain_registrar or '' }}" readonly>
+      </div>
+      <div>
+        <label class="ff-label">Domain Login</label>
+        <input class="ff-input" value="{{ ar.domain_login or '' }}" readonly>
+      </div>
+      <div>
+        <label class="ff-label">Domain Password</label>
+        <input class="ff-input" value="{{ ar.domain_password or '' }}" readonly>
+      </div>
+    </div>
+
+    <label class="ff-label" style="margin-top:12px">Brand notes</label>
+    <textarea class="ff-input" rows="4" readonly>{{ ar.brand_notes or '' }}</textarea>
+
+    <div style="margin-top:18px;display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap">
+      <div>
+        <div class="muted" style="margin-bottom:6px">Signature</div>
+        {% if ar.signature_path %}
+          <a class="btn" href="/{{ ar.signature_path }}" target="_blank" rel="noopener">Open signature</a>
+          <div class="muted" style="margin-top:6px">Stored at: /{{ ar.signature_path }}</div>
+        {% else %}
+          <span class="muted">No signature on file.</span>
+        {% endif %}
+      </div>
+
+      <div>
+        {% if ar_pdf_url %}
+          <div class="muted" style="margin-bottom:6px">PDF</div>
+          <a class="btn" href="{{ ar_pdf_url }}">Download PDF</a>
+        {% endif %}
+      </div>
+    </div>
+
+    <div style="margin-top:22px">
+      <a class="btn btn-ghost" href="{{ url_for('admin_home') }}">← Back to admin</a>
+    </div>
+  </div>
+</div>
+{% endblock %}

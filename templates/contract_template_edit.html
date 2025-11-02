@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% set title = "Edit Contract Template — 4UIT" %}
+{% set heading = "Edit template" %}
+{% set subheading = tpl.name %}
+
+{% block content %}
+<form method="post" class="card">
+  <label class="ff-label">Name</label>
+  <input class="ff-input" name="name" value="{{ tpl.name }}" required>
+
+  <label class="ff-label">Body</label>
+  <textarea class="ff-input" name="body" rows="18" required>{{ tpl.body }}</textarea>
+
+  <label class="ff-label">Set as default?</label>
+  <label><input type="checkbox" name="is_default" value="1" {% if tpl.is_default %}checked{% endif %}> Yes</label>
+
+  <div style="margin-top:8px">
+    <button class="btn">Save</button>
+    <a class="btn btn-ghost" href="{{ url_for('contract_templates_list') }}">Back</a>
+  </div>
+</form>
+{% endblock %}

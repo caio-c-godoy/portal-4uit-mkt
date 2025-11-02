@@ -1,0 +1,205 @@
+{% extends "portal_base.html" %}
+{% block title %}Portal do Cliente — Relatórios{% endblock %}
+
+{% set heading = "Relatórios" %}
+{% set subheading = "Visão geral de performance — números ilustrativos até integrarmos suas fontes reais." %}
+
+{% block extra_head %}
+<style>
+  .kpis{
+    display:grid; gap:14px;
+    grid-template-columns: repeat(6, minmax(120px,1fr));
+  }
+  @media (max-width: 1200px){ .kpis{ grid-template-columns: repeat(3, 1fr); } }
+  @media (max-width: 680px){ .kpis{ grid-template-columns: repeat(2, 1fr); } }
+
+  .card{
+    background:var(--ff-card,#0f172a);
+    border:1px solid rgba(255,255,255,.08);
+    border-radius:14px; padding:14px;
+  }
+  .kpi .label{ color:#94a3b8; font-size:12px; }
+  .kpi .value{ font-weight:800; font-size:22px; margin-top:6px; }
+  .muted{ color:#94a3b8; font-size:12px; }
+
+  .grid{
+    display:grid; gap:16px;
+    grid-template-columns: 1.2fr .8fr;
+  }
+  @media (max-width: 1100px){ .grid{ grid-template-columns: 1fr; } }
+
+  .panel{ background:var(--ff-card,#0f172a); border:1px solid rgba(255,255,255,.08); border-radius:14px; padding:16px; }
+  .panel h3{ margin:0 0 10px; font-size:16px; }
+  .hr{ height:1px; background:rgba(255,255,255,.08); margin:10px 0; }
+
+  table{ width:100%; border-collapse:separate; border-spacing:0; }
+  th, td{ text-align:left; padding:10px 10px; font-size:14px; }
+  thead th{ color:#94a3b8; font-weight:600; border-bottom:1px solid rgba(255,255,255,.08); }
+  tbody td{ border-bottom:1px dashed rgba(255,255,255,.08); }
+  tbody tr:last-child td{ border-bottom:0; }
+
+  .legend{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .dot{ width:10px; height:10px; border-radius:999px; display:inline-block; background:#60a5fa; }
+  .dot.alt{ background:#34d399; }
+
+  /* Gráfico responsivo (SVG) */
+  .chart-wrap{ width:100%; overflow:hidden; border-radius:12px; border:1px solid rgba(255,255,255,.08); }
+  .chart-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<!-- KPIs -->
+<section class="kpis" aria-label="Indicadores principais">
+  <div class="card kpi">
+    <div class="label">Alcance</div>
+    <div class="value">128.4k</div>
+    <div class="muted">Últimos 30 dias (mock)</div>
+  </div>
+  <div class="card kpi">
+    <div class="label">Cliques</div>
+    <div class="value">9,420</div>
+    <div class="muted">CTR 3.1% (mock)</div>
+  </div>
+  <div class="card kpi">
+    <div class="label">Conversões</div>
+    <div class="value">384</div>
+    <div class="muted">CVR 4.1% (mock)</div>
+  </div>
+  <div class="card kpi">
+    <div class="label">Custo / Conv.</div>
+    <div class="value">$12.48</div>
+    <div class="muted">Média geral (mock)</div>
+  </div>
+  <div class="card kpi">
+    <div class="label">CTR</div>
+    <div class="value">3.1%</div>
+    <div class="muted">Todos os canais (mock)</div>
+  </div>
+  <div class="card kpi">
+    <div class="label">CPC</div>
+    <div class="value">$0.51</div>
+    <div class="muted">Média ponderada (mock)</div>
+  </div>
+</section>
+
+<div style="height:14px"></div>
+
+<section class="grid">
+  <!-- Evolução (gráfico) -->
+  <div class="panel">
+    <div class="chart-head">
+      <h3>Evolução — últimos 30 dias</h3>
+      <div class="legend">
+        <span class="dot"></span><span class="muted">Cliques</span>
+        <span class="dot alt"></span><span class="muted">Conversões</span>
+      </div>
+    </div>
+    <div class="chart-wrap" role="img" aria-label="Gráfico de cliques e conversões nos últimos 30 dias (dados simulados)">
+      <!-- SVG simples, sem bibliotecas -->
+      <svg viewBox="0 0 640 280" width="100%" height="auto" preserveAspectRatio="xMidYMid meet">
+        <!-- fundo -->
+        <rect x="0" y="0" width="640" height="280" fill="transparent"></rect>
+        <!-- grid -->
+        {% for y in [240, 200, 160, 120, 80, 40] %}
+          <line x1="40" y1="{{ y }}" x2="610" y2="{{ y }}" stroke="rgba(255,255,255,.08)" stroke-width="1"/>
+        {% endfor %}
+        <!-- eixo -->
+        <line x1="40" y1="250" x2="610" y2="250" stroke="rgba(255,255,255,.25)" stroke-width="1.5"/>
+        <line x1="40" y1="30" x2="40" y2="250" stroke="rgba(255,255,255,.25)" stroke-width="1.5"/>
+
+        <!-- série 1: cliques (linha azul) -->
+        <polyline fill="none" stroke="#60a5fa" stroke-width="2.5"
+          points="
+          40,210  70,190  100,200  130,170  160,175  190,160  220,150  250,140
+          280,155  310,150  340,130  370,135  400,120  430,115  460,128  490,110
+          520,118  550,112  580,106  610,100
+        " />
+        <!-- série 2: conversões (linha verde) -->
+        <polyline fill="none" stroke="#34d399" stroke-width="2.5"
+          points="
+          40,235  70,230  100,228  130,220  160,215  190,210  220,205  250,198
+          280,195  310,190  340,184  370,180  400,176  430,174  460,170  490,165
+          520,162  550,160  580,158  610,156
+        " />
+        <!-- marcadores -->
+        {% for x,y in [(610,100),(580,106),(550,112),(520,118)] %}
+          <circle cx="{{ x }}" cy="{{ y }}" r="3.5" fill="#60a5fa"/>
+        {% endfor %}
+        {% for x,y in [(610,156),(580,158),(550,160),(520,162)] %}
+          <circle cx="{{ x }}" cy="{{ y }}" r="3.5" fill="#34d399"/>
+        {% endfor %}
+      </svg>
+    </div>
+    <div style="margin-top:8px" class="muted">Dados de exemplo. Integrações reais (Meta/Google/LinkedIn) entram aqui depois.</div>
+  </div>
+
+  <!-- Tabela por canal -->
+  <div class="panel">
+    <h3>Desempenho por Canal (mock)</h3>
+    <div class="hr"></div>
+    <table aria-label="Tabela de desempenho por canal">
+      <thead>
+        <tr>
+          <th>Canal</th>
+          <th>Cliques</th>
+          <th>Conv.</th>
+          <th>CTR</th>
+          <th>CPC</th>
+          <th>Custo/Conv.</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Meta Ads</td>
+          <td>4,020</td>
+          <td>168</td>
+          <td>3.4%</td>
+          <td>$0.45</td>
+          <td>$10.71</td>
+        </tr>
+        <tr>
+          <td>Google Ads</td>
+          <td>3,260</td>
+          <td>142</td>
+          <td>2.8%</td>
+          <td>$0.62</td>
+          <td>$13.41</td>
+        </tr>
+        <tr>
+          <td>TikTok Ads</td>
+          <td>1,240</td>
+          <td>42</td>
+          <td>3.9%</td>
+          <td>$0.38</td>
+          <td>$11.24</td>
+        </tr>
+        <tr>
+          <td>Orgânico</td>
+          <td>900</td>
+          <td>32</td>
+          <td>—</td>
+          <td>$0.00</td>
+          <td>$0.00</td>
+        </tr>
+      </tbody>
+    </table>
+    <div style="margin-top:8px" class="muted">Observação: números fictícios. Quando conectarmos as contas do cliente, estes cards e gráficos passam a refletir dados reais.</div>
+  </div>
+</section>
+
+<div style="height:16px"></div>
+
+<!-- Próximos passos -->
+<section class="panel">
+  <h3>Próximos passos</h3>
+  <div class="hr"></div>
+  <ul class="muted" style="margin:0; padding-left:18px; line-height:1.7">
+    <li>Conectar <strong>Meta Business</strong> e <strong>Google Ads</strong> (via acesso do <em>/access-request</em>).</li>
+    <li>Definir metas (CPL/CPA) e eventos de conversão no site (GA4 / Tag Manager).</li>
+    <li>Ativar relatórios por e-mail semanais para o cliente.</li>
+  </ul>
+</section>
+
+{% endblock %}

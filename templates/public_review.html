@@ -1,0 +1,93 @@
+{% extends "portal_base.html" %}
+{% set title = "Review — 4UIT" %}
+{% set heading = "Review asset" %}
+{% set subheading = asset.title %}
+
+{% block content %}
+{% if error %}
+  <div class="alert alert-danger" role="alert">{{ error }}</div>
+{% endif %}
+
+<div class="card">
+  {% if storage_url %}
+    {% if asset.kind in ('image','copy') %}
+      <img src="{{ storage_url }}" alt="" style="max-width:100%;border:1px solid var(--ff-border);border-radius:12px"/>
+    {% else %}
+      <a class="btn" href="{{ storage_url }}" target="_blank" rel="noopener">Open file</a>
+    {% endif %}
+  {% elif external_url %}
+    <a class="btn" href="{{ external_url }}" target="_blank" rel="noopener">Open external link</a>
+  {% else %}
+    <div class="muted">No file attached.</div>
+  {% endif %}
+</div>
+
+<form method="post" action="{{ url_for('public_review_decision', token=token) }}" class="card" style="margin-top:12px" id="reviewForm">
+  <label class="ff-label">Decision</label>
+  <div class="ff-fieldset" style="display:flex; gap:12px; align-items:center">
+    <label style="display:flex;align-items:center;gap:6px">
+      <input type="radio" name="decision" value="approve" required />
+      <span>Approve</span>
+    </label>
+    <label style="display:flex;align-items:center;gap:6px">
+      <input type="radio" name="decision" value="reject" />
+      <span>Reject</span>
+    </label>
+  </div>
+
+  <label class="ff-label" for="comment">Comment</label>
+  <textarea class="ff-input" id="comment" name="comment" rows="3" placeholder="Optional for approval. Required if rejecting."></textarea>
+
+  <label class="ff-label" for="scheduled_for">Schedule (UTC, optional — ISO 8601)</label>
+  <input class="ff-input" id="scheduled_for" name="scheduled_for" placeholder="2025-11-02T14:00:00+00:00">
+  <div class="muted" style="margin-top:6px">
+    Tip: if you want to schedule the post, use an ISO date/time with timezone offset (e.g., <code>2025-11-02T14:00:00+00:00</code>).
+    <button type="button" class="btn btn-xs" id="btnFillIso" style="margin-left:6px">Fill +2h (UTC)</button>
+  </div>
+
+  <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap">
+    <button class="btn" id="submitBtn">Submit</button>
+    <a class="btn btn-secondary" href="{{ url_for('public_review', token=token) }}">Refresh</a>
+  </div>
+</form>
+
+<script>
+  (function () {
+    const form = document.getElementById('reviewForm');
+    const comment = document.getElementById('comment');
+    const radios = form.querySelectorAll('input[name="decision"]');
+    const btnFillIso = document.getElementById('btnFillIso');
+    const scheduled = document.getElementById('scheduled_for');
+    const submitBtn = document.getElementById('submitBtn');
+
+    function syncCommentRequired() {
+      const val = [...radios].find(r => r.checked)?.value;
+      const must = (val === 'reject');
+      comment.required = must;
+      comment.placeholder = must ? "Please explain the reason for rejection (required)." :
+                                   "Optional for approval. Required if rejecting.";
+    }
+    radios.forEach(r => r.addEventListener('change', syncCommentRequired));
+    syncCommentRequired();
+
+    btnFillIso?.addEventListener('click', function () {
+      try {
+        const now = new Date();
+        now.setHours(now.getUTCHours() + 2);
+        const iso = new Date(now.toISOString()); // normalized UTC
+        // keep it simple: full ISO with Z (UTC)
+        scheduled.value = iso.toISOString();
+      } catch (e) {}
+    });
+
+    form.addEventListener('submit', function () {
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Submitting...';
+      setTimeout(() => {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Submit';
+      }, 6000);
+    });
+  })();
+</script>
+{% endblock %}

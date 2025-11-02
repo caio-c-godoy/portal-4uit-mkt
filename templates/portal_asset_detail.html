@@ -1,0 +1,102 @@
+{% extends "portal_base.html" %}
+{% block title %}Portal do Cliente — Detalhe da Arte{% endblock %}
+
+{% block extra_head %}
+<style>
+  .wrap{ display:grid; gap:18px; grid-template-columns: 1.2fr .8fr; }
+  @media (max-width: 980px){ .wrap{ grid-template-columns: 1fr; } }
+  .panel{
+    background:var(--ff-card,#0f172a);
+    border:1px solid rgba(255,255,255,.08);
+    border-radius:14px; padding:16px;
+  }
+  .title{ font-weight:800; font-size:18px; margin-bottom:6px; }
+  .muted{ color:#94a3b8; font-size:13px; }
+  .media{ width:100%; border-radius:12px; border:1px solid rgba(255,255,255,.08); background:#0b1220; }
+  .badge{
+    font-size:12px; padding:4px 9px; border-radius:999px;
+    border:1px solid rgba(255,255,255,.15); text-transform:capitalize;
+  }
+  .badge.pending{ background:rgba(234,179,8,.12); border-color:rgba(234,179,8,.35); }
+  .badge.approved{ background:rgba(34,197,94,.12); border-color:rgba(34,197,94,.35); }
+  .badge.rejected{ background:rgba(239,68,68,.12); border-color:rgba(239,68,68,.35); }
+  .badge.posted{ background:rgba(59,130,246,.12); border-color:rgba(59,130,246,.35); }
+  .btn{
+    display:inline-flex; align-items:center; justify-content:center;
+    padding:10px 12px; border-radius:10px; font-weight:700; font-size:14px;
+    background:#0ea5e9; color:#001018; text-decoration:none; border:none; cursor:pointer;
+  }
+  .btn.secondary{ background:transparent; color:#93c5fd; border:1px solid rgba(147,197,253,.35); }
+  .stack{ display:flex; flex-direction:column; gap:12px; }
+  .row{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  textarea{ width:100%; min-height:110px; border-radius:10px; padding:10px;
+    border:1px solid rgba(255,255,255,.14); background:transparent; color:inherit; }
+  input[type="datetime-local"]{
+    width:100%; padding:10px; border-radius:10px; border:1px solid rgba(255,255,255,.14);
+    background:transparent; color:inherit;
+  }
+  .small{ font-size:12px; color:#94a3b8; }
+</style>
+{% endblock %}
+
+{% set heading = "Detalhe da Arte" %}
+{% set subheading = "Visualize e aprove/reprove com comentário." %}
+
+{% block content %}
+<div class="wrap">
+  <section class="panel">
+    <div class="row" style="justify-content:space-between; margin-bottom:10px">
+      <div class="title">{{ a.title }}</div>
+      <span class="badge {{ a.status }}">{{ a.status }}</span>
+    </div>
+
+    {% if preview_url %}
+      {% set lower = (a.file_mime or '')|lower %}
+      {% if lower.startswith('video/') or (a.storage_path and a.storage_path.endswith(('.mp4','.mov','.webm','.mkv'))) %}
+        <video class="media" src="{{ preview_url }}" controls playsinline></video>
+      {% else %}
+        <img class="media" src="{{ preview_url }}" alt="{{ a.title }}">
+      {% endif %}
+    {% else %}
+      <div class="media" style="aspect-ratio:16/9"></div>
+    {% endif %}
+
+    {% if a.description %}
+      <p style="margin-top:12px">{{ a.description }}</p>
+    {% endif %}
+
+    <div class="small" style="margin-top:8px">
+      ID #{{ a.id }}
+      • Criado: {{ a.created_at.strftime('%Y-%m-%d %H:%M') if a.created_at else '-' }}
+      {% if a.scheduled_for %} • Agendado (UTC): {{ a.scheduled_for.isoformat() }}{% endif %}
+    </div>
+
+    <div class="row" style="margin-top:14px; gap:8px">
+      <a class="btn" href="{{ review_url }}" target="_blank">Abrir Página de Revisão</a>
+      {% if a.storage_path %}
+        <a class="btn secondary" href="/{{ a.storage_path }}" target="_blank">Abrir Arquivo</a>
+      {% endif %}
+    </div>
+  </section>
+
+  <aside class="panel">
+    <form class="stack" method="post" action="{{ review_url }}/decision">
+      <div class="row">
+        <button class="btn" name="decision" value="approve" type="submit">Aprovar</button>
+        <button class="btn secondary" name="decision" value="reject" type="submit">Reprovar</button>
+      </div>
+
+      <label class="small">Comentário (opcional)</label>
+      <textarea name="comment" placeholder="Deixe um comentário para nossa equipe..."></textarea>
+
+      <label class="small">Agendar publicação (opcional, UTC)</label>
+      <input type="datetime-local" name="scheduled_for"/>
+
+      <div class="small">
+        Dica: você também pode abrir a <a href="{{ review_url }}" target="_blank">Página de Revisão</a>
+        e enviar sua decisão por lá.
+      </div>
+    </form>
+  </aside>
+</div>
+{% endblock %}

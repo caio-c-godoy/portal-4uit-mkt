@@ -1,0 +1,210 @@
+{% extends "portal_base.html" %}
+{% set title = "Access Request — 4UIT" %}
+{% set heading = "Access Request" %}
+{% set subheading = "Grant us access to your platforms" %}
+
+{% block content %}
+<div class="card" style="max-width:900px;margin:0 auto">
+  <form id="arForm">
+    <label class="ff-label">Company</label>
+    <input class="ff-input" name="client_company" value="{{ prefill_company or '' }}" required>
+
+    <label class="ff-label">Your name</label>
+    <input class="ff-input" name="signer_name" required>
+
+    <label class="ff-label">Your e-mail</label>
+    <input class="ff-input" type="email" name="signer_email" value="{{ prefill_email or '' }}" required>
+
+    <div class="grid" style="grid-template-columns:1fr 1fr; gap:12px">
+      <div>
+        <label class="ff-label">Instagram (user)</label>
+        <input class="ff-input" name="instagram_user">
+      </div>
+      <div>
+        <label class="ff-label">Facebook Page</label>
+        <input class="ff-input" name="facebook_page">
+      </div>
+      <div>
+        <label class="ff-label">Meta BM ID</label>
+        <input class="ff-input" name="meta_bm_id">
+      </div>
+      <div>
+        <label class="ff-label">Meta Ads Account</label>
+        <input class="ff-input" name="meta_ads_account_id">
+      </div>
+      <div>
+        <label class="ff-label">Google Ads ID</label>
+        <input class="ff-input" name="google_ads_id">
+      </div>
+      <div>
+        <label class="ff-label">Website URL</label>
+        <input class="ff-input" name="website_url">
+      </div>
+      <div>
+        <label class="ff-label">Hosting</label>
+        <input class="ff-input" name="hosting">
+      </div>
+      <div>
+        <label class="ff-label">Hosting Login</label>
+        <input class="ff-input" name="hosting_login">
+      </div>
+      <div>
+        <label class="ff-label">Hosting Password</label>
+        <input class="ff-input" name="hosting_password">
+      </div>
+      <div>
+        <label class="ff-label">Domain Registrar</label>
+        <input class="ff-input" name="domain_registrar">
+      </div>
+      <div>
+        <label class="ff-label">Domain Login</label>
+        <input class="ff-input" name="domain_login">
+      </div>
+      <div>
+        <label class="ff-label">Domain Password</label>
+        <input class="ff-input" name="domain_password">
+      </div>
+    </div>
+
+    <label class="ff-label">Brand notes</label>
+    <textarea class="ff-input" rows="4" name="brand_notes"></textarea>
+
+    <!-- ASSINATURA -->
+    <div class="muted" style="margin:14px 0 6px">Draw your signature below:</div>
+    <div style="width:100%;height:220px;border:1px dashed var(--ff-border);border-radius:8px;background:#ffffff">
+      <canvas id="accSigCanvas" style="width:100%;height:100%;display:block;touch-action:none;"></canvas>
+    </div>
+    <input type="hidden" name="signature_data_url" id="accSigData">
+
+    <div class="d-flex gap-2 mt-2">
+      <button class="btn btn-ghost" type="button" id="accSigClear">Clear</button>
+      <span class="muted" style="align-self:center;font-size:.9rem">Use mouse ou toque (mobile). Clique em “Clear” para refazer.</span>
+    </div>
+
+    <button class="btn" id="arSubmitBtn" type="submit" style="margin-top:14px">Submit</button>
+  </form>
+</div>
+
+<style>
+  @media (max-width: 720px){
+    .grid{ grid-template-columns:1fr !important; }
+  }
+</style>
+
+<script>
+(() => {
+  const canvas = document.getElementById('accSigCanvas');
+  const hidden = document.getElementById('accSigData');
+  const clear  = document.getElementById('accSigClear');
+  const form   = document.getElementById('arForm');
+  const submit = document.getElementById('arSubmitBtn');
+  const ctx    = canvas.getContext('2d');
+
+  let drawing = false;
+
+  function setupCtx(){
+    ctx.lineWidth = 2;
+    ctx.lineJoin  = 'round';
+    ctx.lineCap   = 'round';
+    ctx.strokeStyle = '#111827'; // preto
+  }
+
+  function resize(){
+    // alta definição (retina)
+    const ratio = Math.max(window.devicePixelRatio || 1, 1);
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    if(!w || !h) return;
+    canvas.width  = Math.floor(w * ratio);
+    canvas.height = Math.floor(h * ratio);
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    setupCtx();
+  }
+
+  function getPos(e){
+    const r = canvas.getBoundingClientRect();
+    const s = e.touches ? e.touches[0] : e;
+    return { x: s.clientX - r.left, y: s.clientY - r.top };
+  }
+
+  function start(e){
+    e.preventDefault();
+    drawing = true;
+    const p = getPos(e);
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+  }
+
+  function move(e){
+    if(!drawing) return;
+    e.preventDefault();
+    const p = getPos(e);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+  }
+
+  function end(e){
+    if(!drawing) return;
+    e.preventDefault();
+    drawing = false;
+  }
+
+  // mouse
+  canvas.addEventListener('mousedown', start);
+  canvas.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', end);
+  // touch
+  canvas.addEventListener('touchstart', start, { passive:false });
+  canvas.addEventListener('touchmove',  move,  { passive:false });
+  canvas.addEventListener('touchend',   end);
+
+  clear.addEventListener('click', (e) => {
+    e.preventDefault();
+    resize();
+    hidden.value = '';
+  });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    // valida assinatura (torna obrigatório; remova este bloco se quiser opcional)
+    const blank = document.createElement('canvas');
+    blank.width = canvas.width; blank.height = canvas.height;
+    if (canvas.toDataURL() === blank.toDataURL()){
+      alert('Please draw your signature.');
+      return;
+    }
+
+    hidden.value = canvas.toDataURL('image/png');
+
+    // envia
+    submit.disabled = true; submit.textContent = 'Submitting...';
+    try{
+      const fd = new FormData(form);
+      const payload = Object.fromEntries(fd.entries());
+      const res = await fetch('/api/access-request', {
+        method: 'POST',
+        headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const j = await res.json().catch(() => ({}));
+      if (res.ok && j.ok){
+        // redireciona para histórico do portal
+        window.location.href = '/portal/contracts';
+      } else {
+        alert('Error: ' + (j.error || res.statusText || 'failed'));
+      }
+    } catch(err){
+      alert('Network error: ' + err);
+    } finally{
+      submit.disabled = false; submit.textContent = 'Submit';
+    }
+  });
+
+  // init
+  resize();
+  window.addEventListener('resize', resize);
+})();
+</script>
+{% endblock %}

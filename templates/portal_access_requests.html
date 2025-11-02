@@ -1,0 +1,21 @@
+{% extends "portal_base.html" %}
+{% block title %}Access Requests{% endblock %}
+{% block content %}
+  <h2 class="page-title">Access Requests</h2>
+  <p class="mb-3">
+    <a class="btn btn-primary" href="{{ access_form_url }}" target="_blank">Atualizar / Enviar novo</a>
+  </p>
+  {% if not access_list %}
+    <div class="alert alert-info">Você ainda não enviou nenhum Access Request.</div>
+  {% else %}
+    <div class="list-group">
+      {% for a in access_list %}
+        <div class="list-group-item">
+          <div class="fw-bold">#{{ a.id }} • {{ a.submitted_at or a.created_at }}</div>
+          <div class="text-muted small">{{ a.website_url or "-" }} • {{ a.google_ads_id or "-" }} • {{ a.meta_ads_account_id or "-" }}</div>
+          {% if a.client_comment %}<div class="mt-2">{{ a.client_comment }}</div>{% endif %}
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+{% endblock %}

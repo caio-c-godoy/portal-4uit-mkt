@@ -1,0 +1,88 @@
+{% extends "portal_base.html" %}
+{% set title = "Review Asset — 4UIT" %}
+{% set heading = "Review Asset" %}
+{% set subheading = "Approve, request changes, or reject with a short note" %}
+
+{% block content %}
+<div class="card" style="display:grid;grid-template-columns:1.2fr .8fr;gap:16px">
+  <div>
+    <div class="muted" style="margin-bottom:6px">Asset #{{ a.id }}</div>
+    <h3 class="h5" style="margin:0">{{ a.title or a.filename or 'Untitled asset' }}</h3>
+    <div class="muted" style="margin:4px 0 12px">Status: <strong>{{ a.status or 'pending' }}</strong></div>
+
+    {% if preview_url %}
+      <div style="border:1px solid var(--ff-border,rgba(255,255,255,.08));border-radius:10px;overflow:hidden">
+        {% if preview_url.endswith('.mp4') %}
+          <video src="{{ preview_url }}" controls style="width:100%;height:auto;display:block"></video>
+        {% elif preview_url.endswith('.pdf') %}
+          <iframe src="{{ preview_url }}" style="width:100%;height:520px;border:0"></iframe>
+        {% else %}
+          <img src="{{ preview_url }}" alt="Preview" style="max-width:100%;height:auto;display:block">
+        {% endif %}
+      </div>
+    {% else %}
+      <div class="muted">No preview available. You can still leave your feedback below.</div>
+    {% endif %}
+  </div>
+
+  <div>
+    <form method="post" action="{{ url_for('portal_asset_review_submit', asset_id=a.id) }}" id="reviewForm">
+      <label class="ff-label">Notes</label>
+      <textarea class="ff-input" name="note" rows="6" placeholder="Add context or requested edits (copy changes, colors, layout, etc.)"></textarea>
+
+      <input type="hidden" name="action" id="actionField">
+
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+        <button type="button" class="btn" onclick="submitAction('approve')">Approve</button>
+        <button type="button" class="btn btn-ghost" onclick="submitAction('changes')">Request changes</button>
+        <button type="button" class="btn" style="background:#dc2626" onclick="submitAction('reject')">Reject</button>
+      </div>
+    </form>
+
+    <script>
+      function submitAction(action){
+        const note = (document.querySelector('[name=note]').value || '').trim();
+        if((action === 'changes' || action === 'reject') && !note){
+          alert('Please add a note explaining your request.');
+          return;
+        }
+        document.getElementById('actionField').value = action;
+        document.getElementById('reviewForm').submit();
+      }
+    </script>
+
+    <div style="margin-top:18px">
+      <h4 class="h5" style="margin:0 0 8px">History</h4>
+      <div class="muted">Your previous submissions for this asset.</div>
+      <div class="card" style="padding:0;margin-top:10px">
+        <div style="overflow:auto">
+          <table>
+            <thead>
+              <tr>
+                <th>Date (UTC)</th>
+                <th>Action</th>
+                <th>Notes</th>
+                <th>By</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for r in reviews %}
+              <tr>
+                <td>{{ r.created_at.isoformat() }}</td>
+                <td>{{ r.status }}</td>
+                <td style="white-space:pre-wrap">{{ r.note or '—' }}</td>
+                <td>{{ r.created_by_email or '—' }}</td>
+              </tr>
+              {% endfor %}
+              {% if not reviews %}
+              <tr><td colspan="4" class="muted" style="padding:10px">No history yet.</td></tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}

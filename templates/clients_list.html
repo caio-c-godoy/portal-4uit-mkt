@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% set title = "Clients — 4UIT" %}
+{% set heading = "Clients" %}
+{% set subheading = "Directory & emails" %}
+
+{% block content %}
+<div class="card">
+  <form method="get" class="grid" style="grid-template-columns:1.2fr auto; gap:10px; align-items:end">
+    <div>
+      <label class="ff-label">Search (name/email/EIN)</label>
+      <input class="ff-input" type="search" name="q" placeholder="Type a name or email…" value="{{ qtext }}">
+    </div>
+    <div style="display:flex; gap:8px">
+      <button class="btn" type="submit">Search</button>
+      <a class="btn btn-ghost" href="{{ url_for('clients_list') }}">Reset</a>
+      <a class="btn btn-ghost" href="{{ sort_url() }}">Sort {{ caret() }}</a>
+    </div>
+  </form>
+</div>
+
+<div class="card" style="margin-top:12px">
+  <form method="post" action="{{ url_for('clients_new') }}" class="grid" style="grid-template-columns:1fr 1fr; gap:12px">
+    <div>
+      <label class="ff-label">Company name</label>
+      <input class="ff-input" name="company_name" required>
+    </div>
+    <div>
+      <label class="ff-label">Contact e-mail</label>
+      <input class="ff-input" name="contact_email" type="email">
+    </div>
+    <div>
+      <label class="ff-label">Account Manager e-mail (CC)</label>
+      <input class="ff-input" name="account_manager_email" type="email" placeholder="ex.: caio@4uit.us">
+    </div>
+    <div>
+      <label class="ff-label">EIN</label>
+      <input class="ff-input" name="ein">
+    </div>
+    <div style="grid-column:1 / -1">
+      <label class="ff-label">Address</label>
+      <input class="ff-input" name="address">
+    </div>
+    <div>
+      <label class="ff-label">Legal representative</label>
+      <input class="ff-input" name="legal_representative">
+    </div>
+    <div style="grid-column:1 / -1">
+      <button class="btn" type="submit">Add client</button>
+    </div>
+  </form>
+</div>
+
+<div class="card" style="padding:0; margin-top:14px">
+  <div style="overflow:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Company</th>
+          <th>Contact</th>
+          <th>AM (CC)</th>
+          <th>EIN</th>
+          <th style="width:360px">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in clients %}
+        <tr>
+          <td>{{ c.id }}</td>
+          <td>{{ c.company_name|hl(qtext) }}</td>
+          <td>{{ (c.contact_email or '-')|hl(qtext) }}</td>
+          <td>{{ (c.account_manager_email or '-')|hl(qtext) }}</td>
+          <td>{{ (c.ein or '-')|hl(qtext) }}</td>
+          <td style="white-space:nowrap">
+            <a class="btn btn-ghost" href="{{ url_for('clients_edit', client_id=c.id) }}">Edit</a>
+            <a class="btn btn-ghost" href="{{ url_for('client_contract_pref', client_id=c.id) }}">Contract</a>
+            <a class="btn btn-ghost" href="{{ url_for('clients_links', client_id=c.id) }}">Links</a>
+
+            <!-- Delete “normal”: bloqueia se houver vínculos -->
+            <form method="post"
+                  action="{{ url_for('clients_delete', client_id=c.id) }}"
+                  style="display:inline; margin-left:6px"
+                  onsubmit="return confirm('Excluir o cliente {{ c.company_name|e }}? Se houver contratos/assets/access vinculados, a exclusão será bloqueada.');">
+              <button class="btn" style="background:#dc2626">Delete</button>
+            </form>
+
+            <!-- Delete FORÇADO: apaga também contratos, assets e access requests -->
+            <form method="post"
+                  action="{{ url_for('clients_delete', client_id=c.id) }}"
+                  style="display:inline; margin-left:6px"
+                  onsubmit="return confirm('⚠️ EXCLUSÃO FORÇADA de {{ c.company_name|e }}. Isso APAGARÁ contratos, assets e access requests vinculados. Esta ação é irreversível. Continuar?');">
+              <input type="hidden" name="force" value="1">
+              <button class="btn btn-ghost" style="border:1px solid #dc2626; color:#dc2626">Delete (force)</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+        {% if not clients %}
+        <tr><td colspan="6" class="muted" style="padding:14px">No clients found.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

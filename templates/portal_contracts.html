@@ -1,0 +1,102 @@
+{% extends "portal_base.html" %}
+{% set title = "My Agreements & Access — 4UIT" %}
+{% set heading = "My Agreements" %}
+{% set subheading = "Download your signed agreements and manage access info" %}
+
+{% block content %}
+
+<div class="card" style="margin-bottom:14px">
+  <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center">
+    <div>
+      <div class="muted" style="margin-bottom:6px">
+        {% if client %} Company: <strong>{{ client.company_name }}</strong>
+        {% else %} <em>We couldn't link your user to a client record.</em>
+        {% endif %}
+      </div>
+      <h3 class="h5" style="margin:0">Signed agreements</h3>
+      <div class="muted">Download a copy of your signed contract(s).</div>
+    </div>
+  </div>
+
+  <div style="overflow:auto;margin-top:12px">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Signed at (UTC)</th>
+          <th>Signer</th>
+          <th>Client</th>
+          <th style="width:160px">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for c in contracts %}
+        <tr>
+          <td>{{ c.id }}</td>
+          <td>{{ c.signed_at.isoformat() if c.signed_at else "-" }}</td>
+          <td>{{ c.signer_name or "-" }} &lt;{{ c.signer_email or "-" }}&gt;</td>
+          <td>{{ c.client.company_name if c.client else "-" }}</td>
+          <td>
+            <a class="btn" href="{{ url_for('portal_contract_pdf', contract_id=c.id) }}">Download PDF</a>
+          </td>
+        </tr>
+      {% endfor %}
+      {% if not contracts %}
+        <tr><td colspan="5" class="muted" style="padding:14px">No signed contracts yet.</td></tr>
+      {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
+    <div>
+      <h3 class="h5" style="margin:0">Access Information (Ads / Analytics / Domain / Hosting)</h3>
+      <div class="muted">
+        {% if access_last %}
+          Last submitted: {{ access_last.submitted_at.isoformat() if access_last.submitted_at else "—" }}
+        {% else %}
+          Pending: please submit your access information so our team can start.
+        {% endif %}
+      </div>
+    </div>
+    <div>
+      <a class="btn" href="{{ access_prefill }}">
+        {{ 'Update my access info' if access_last else 'Fill my access info' }}
+      </a>
+    </div>
+  </div>
+
+  <div style="overflow:auto;margin-top:12px">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Submitted at (UTC)</th>
+          <th>Submitted by</th>
+          <th>E-mail</th>
+          <th style="width:160px">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in access_rows %}
+        <tr>
+          <td>{{ r.id }}</td>
+          <td>{{ r.submitted_at.isoformat() if r.submitted_at else "-" }}</td>
+          <td>{{ r.signer_name or "-" }}</td>
+          <td>{{ r.signer_email or "-" }}</td>
+          <td>
+            <a class="btn" href="{{ url_for('portal_access_pdf', ar_id=r.id) }}">Download PDF</a>
+          </td>
+        </tr>
+        {% endfor %}
+        {% if not access_rows %}
+        <tr><td colspan="5" class="muted" style="padding:14px">No access info submitted yet.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% endblock %}

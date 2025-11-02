@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% set title = "Edit Client — 4UIT" %}
+{% set heading = "Edit Client" %}
+{% set subheading = c.company_name %}
+
+{% block content %}
+<form method="post" class="card">
+  <label class="ff-label">Company name</label>
+  <input class="ff-input" name="company_name" value="{{ c.company_name }}" required>
+
+  <label class="ff-label">Contact email</label>
+  <input class="ff-input" name="contact_email" type="email" value="{{ c.contact_email or '' }}">
+
+  <label class="ff-label">Account Manager email (CC)</label>
+  <input class="ff-input" name="account_manager_email" type="email" value="{{ c.account_manager_email or '' }}">
+
+  <label class="ff-label">EIN</label>
+  <input class="ff-input" name="ein" value="{{ c.ein or '' }}">
+
+  <label class="ff-label">Address</label>
+  <input class="ff-input" name="address" value="{{ c.address or '' }}">
+
+  <label class="ff-label">Legal representative</label>
+  <input class="ff-input" name="legal_representative" value="{{ c.legal_representative or '' }}">
+
+  <div style="margin-top:12px">
+    <button class="btn">Save</button>
+    <a class="btn" href="{{ url_for('clients_list') }}" style="background:#6b7280">Back</a>
+  </div>
+</form>
+{% endblock %}

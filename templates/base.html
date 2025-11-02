@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="{{ lang or 'en' }}" data-theme="dark" data-density="cozy">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>{% block title %}{{ title or "4UIT Admin" }}{% endblock %}</title>
+
+  <!-- Pre-boot: define tema e densidade ANTES do CSS (evita flash visual) -->
+  <script>
+    (function () {
+      try {
+        var root = document.documentElement;
+
+        // Tema
+        var savedTheme = localStorage.getItem('ffTheme');
+        if (savedTheme === 'light' || savedTheme === 'dark') {
+          root.setAttribute('data-theme', savedTheme);
+        } else {
+          var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+          root.setAttribute('data-theme', prefersDark ? 'dark' : 'light');
+        }
+
+        // Densidade
+        var savedDensity = localStorage.getItem('ffDensity');
+        var allowed = ['compact','cozy','comfortable'];
+        root.setAttribute('data-density', allowed.includes(savedDensity) ? savedDensity : 'cozy');
+      } catch (e) {}
+    })();
+  </script>
+
+  <!-- CSS global -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}"/>
+
+  {% block extra_head %}{% endblock %}
+</head>
+<body>
+  
+
+  <header class="topbar" role="banner">
+    <div class="topbar-inner">
+      <div class="brand">
+        <a href="{% if current_user.is_authenticated %}{{ url_for('admin_home') }}{% else %}{{ url_for('home') }}{% endif %}" class="brand-link">
+          <img src="{{ url_for('static', filename='img/4uit.png') }}" alt="4UIT" />
+          <span>Admin</span>
+        </a>
+      </div>
+
+      <!-- Mobile menu toggle (opcional, depende do seu CSS) -->
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="primaryNav" aria-label="Toggle navigation">
+        ☰
+      </button>
+
+      <nav id="primaryNav" class="top-nav" aria-label="Primary">
+        {% if current_user.is_authenticated %}
+          <a href="{{ url_for('admin_home') }}"><span>Dashboard</span></a>
+          <a href="{{ url_for('assets_list') }}"><span>Assets</span></a>
+          <a href="{{ url_for('clients_list') }}"><span>Clients</span></a>
+          <a href="{{ url_for('logout') }}"><span>Sign out</span></a>
+        {% else %}
+          <a href="{{ url_for('home') }}"><span>Home</span></a>
+          <a href="{{ url_for('login') }}"><span>Sign in</span></a>
+        {% endif %}
+
+        <!-- Preferências de UI -->
+        <div class="ui-controls" aria-label="Interface preferences">
+          <!-- Toggle de tema (ÚNICO) -->
+          <button id="themeToggle" class="btn-ghost" type="button" title="Toggle light/dark" aria-label="Toggle theme">
+            <span id="themeIcon" aria-hidden="true">🌙</span>
+            <span id="themeText" class="muted" style="margin-left:6px">Dark</span>
+          </button>
+
+          
+        </div>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main" class="container" role="main">
+    <div class="page-head">
+      <div class="page-titles">
+        <h1>{{ heading or "Admin" }}</h1>
+        {% if subheading %}<div class="sub">{{ subheading }}</div>{% endif %}
+      </div>
+      <div class="page-actions">
+        {% block page_actions %}{% endblock %}
+      </div>
+    </div>
+
+    <!-- Área única de flash -->
+    <div id="flash-wrap" role="status" aria-live="polite">
+      {% with msgs = get_flashed_messages(with_categories=true) %}
+        {% if msgs %}
+          {% for cat, m in msgs %}
+            <div class="alert {{ cat }}" role="alert">{{ m }}</div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+    </div>
+
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer role="contentinfo">
+    4UIT Solutions LLC • 7362 Futures Dr, Bay 15, Orlando, FL 32819
+  </footer>
+
+  <!-- Scripts base -->
+  <script>
+    (function () {
+      // Mobile nav toggle (seu CSS deve esconder/mostrar com [data-open="true"])
+      var navBtn = document.querySelector('.nav-toggle');
+      var nav = document.getElementById('primaryNav');
+      if (navBtn && nav) {
+        navBtn.addEventListener('click', function () {
+          var open = navBtn.getAttribute('aria-expanded') === 'true';
+          navBtn.setAttribute('aria-expanded', String(!open));
+          nav.toggleAttribute('data-open');
+        });
+      }
+
+      // Tema
+      var btn = document.getElementById('themeToggle');
+      function themeUI() {
+        var t = document.documentElement.getAttribute('data-theme') || 'dark';
+        var icon = document.getElementById('themeIcon');
+        var label = document.getElementById('themeText');
+        if (icon) icon.textContent = (t === 'dark') ? '🌙' : '☀️';
+        if (label) label.textContent = (t === 'dark') ? 'Dark' : 'Light';
+      }
+      function setTheme(next) {
+        document.documentElement.setAttribute('data-theme', next);
+        try { localStorage.setItem('ffTheme', next); } catch (e) {}
+        themeUI();
+      }
+      if (btn) {
+        btn.addEventListener('click', function () {
+          var cur = document.documentElement.getAttribute('data-theme') || 'dark';
+          setTheme(cur === 'dark' ? 'light' : 'dark');
+        });
+      }
+      themeUI();
+
+      // Densidade
+      var segs = document.querySelectorAll('.segmented .seg');
+      function setDensity(d) {
+        var allowed = ['compact','cozy','comfortable'];
+        if (!allowed.includes(d)) d = 'cozy';
+        document.documentElement.setAttribute('data-density', d);
+        try { localStorage.setItem('ffDensity', d); } catch (e) {}
+        segs.forEach(function (b) {
+          var active = b.getAttribute('data-density') === d;
+          b.classList.toggle('is-active', active);
+          b.setAttribute('aria-pressed', String(active));
+        });
+      }
+      segs.forEach(function (b) {
+        b.addEventListener('click', function () {
+          setDensity(b.getAttribute('data-density'));
+        });
+      });
+      // Inicializa estado visual conforme pre-boot
+      setDensity(document.documentElement.getAttribute('data-density') || 'cozy');
+
+      // Auto-dismiss dos alerts (opcional)
+      var alerts = document.querySelectorAll('#flash-wrap .alert');
+      if (alerts.length) {
+        setTimeout(function () {
+          alerts.forEach(function (el) { el.classList.add('is-fading'); });
+          setTimeout(function () {
+            alerts.forEach(function (el) { if (el && el.parentNode) el.parentNode.removeChild(el); });
+          }, 800);
+        }, 6000);
+      }
+    })();
+  </script>
+
+  {% block extra_js %}{% endblock %}
+</body>
+</html>

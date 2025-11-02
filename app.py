@@ -1,0 +1,2639 @@
+import os, base64, uuid, mimetypes, pathlib, secrets, smtplib
+from datetime import datetime, timezone
+from functools import wraps
+from email.message import EmailMessage
+from sqlalchemy import or_, asc, desc
+import re
+from markupsafe import Markup, escape
+from urllib.parse import urlencode, quote
+import json
+from flask import current_app
+
+from flask import (
+    Flask, request, render_template, render_template_string,
+    jsonify, send_from_directory, send_file, redirect, url_for,
+    flash, abort, make_response
+)
+from dotenv import load_dotenv
+from werkzeug.utils import secure_filename
+
+
+# DB / Models
+from extensions import db
+from models import Client, Contract, AccessRequest, User, Asset, ContractTemplate, ClientContractPref, AssetReview
+
+# Auth
+from flask_login import (
+    LoginManager, login_user, logout_user,
+    login_required, current_user
+)
+
+# PDF (ReportLab)
+try:
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.pdfgen import canvas as rl_canvas
+    from reportlab.lib.utils import ImageReader
+    REPORTLAB_AVAILABLE = True
+except Exception:
+    REPORTLAB_AVAILABLE = False
+
+# Thumbnails
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except Exception:
+    PIL_AVAILABLE = False
+
+# Tokens (onboarding e set-password)
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+
+
+# -------------------------------------------------
+# App & Config
+# -------------------------------------------------
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+app = Flask(
+    __name__,
+    static_folder="static",
+    template_folder="templates",
+    instance_path=os.path.join(BASE_DIR, "instance"),
+)
+app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "dev")
+app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL") or (
+    "sqlite:///" + os.path.join(app.instance_path, "app.db")
+)
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB
+
+from werkzeug.middleware.proxy_fix import ProxyFix
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+app.config["PREFERRED_URL_SCHEME"] = "https"
+
+
+# --- Upload roots (persist on Azure App Service) ---
+UPLOAD_ROOT = os.environ.get("UPLOAD_ROOT", os.path.join("/home", "data", "uploads"))
+os.makedirs(UPLOAD_ROOT, exist_ok=True)
+
+UPLOAD_SIGS_DIR = os.path.join(UPLOAD_ROOT, "signatures")
+UPLOAD_ASSETS_DIR = os.path.join(UPLOAD_ROOT, "assets")
+UPLOAD_ASSETS_THUMBS_DIR = os.path.join(UPLOAD_ASSETS_DIR, "thumbs")
+UPLOAD_CONTRACTS_DIR = os.path.join(UPLOAD_ROOT, "contracts")
+ACCESS_SIGS_DIR = os.path.join(UPLOAD_ROOT, "access_signatures")
+
+for p in (UPLOAD_SIGS_DIR, UPLOAD_ASSETS_DIR, UPLOAD_ASSETS_THUMBS_DIR, UPLOAD_CONTRACTS_DIR, ACCESS_SIGS_DIR):
+    os.makedirs(p, exist_ok=True)
+
+ASSETS_DIR = UPLOAD_ASSETS_DIR  # alias
+
+
+ASSETS_DIR = UPLOAD_ASSETS_DIR  # alias
+
+# DB
+db.init_app(app)
+
+# Login
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = "login"
+
+
+@login_manager.user_loader
+def load_user(user_id: str):
+    try:
+        return db.session.get(User, int(user_id))
+    except Exception:
+        return None
+
+
+def seed_admin():
+    email = os.getenv("ADMIN_EMAIL")
+    pwd = os.getenv("ADMIN_PASSWORD")
+    name = os.getenv("ADMIN_NAME", "4UIT Admin")
+    if not email or not pwd:
+        return
+    if not User.query.filter_by(email=email).first():
+        u = User(name=name, email=email, role="admin")
+        u.set_password(pwd)
+        db.session.add(u)
+        db.session.commit()
+
+
+def seed_default_contract_template():
+    if ContractTemplate.query.count() == 0:
+        default_body = """4UIT SOLUTIONS LLC — MASTER SERVICES AGREEMENT (MSA)
+Effective on the date of e-signature below (“Effective Date”).
+
+1) Parties.
+This Agreement is between 4UIT Solutions LLC (“Provider”, “4UIT”) and the client identified in the signature block (“Client”).
+
+2) Services & Deliverables.
+Provider will perform professional services that may include: marketing strategy, creative/content production, paid media (Google/Meta/TikTok/etc.), landing pages, websites and web/mobile app development, analytics/BI, and related growth services (the “Services”). Specific deliverables, timelines, KPIs and add-ons will be detailed in a Statement of Work (“SOW”).
+
+3) Term.
+Month-to-month unless stated otherwise in SOW, auto-renewing monthly.
+
+4) Fees & Invoicing.
+As per SOW. Invoices monthly in advance, NET 7. Out-of-pocket above US$100 with prior approval.
+
+5) Client Responsibilities.
+Provide timely access to accounts/materials and comply with platform policies.
+
+6) Approvals & Posting.
+Approvals via e-mail, portal, or review link authorize posting/scheduling.
+
+7) IP.
+Client owns paid-for work product; 4UIT retains pre-existing tools/libraries with license to Client as embedded.
+
+8) Confidentiality & Data.
+2-year confidentiality (trade secrets while secret). 4UIT aplica práticas razoáveis de segurança.
+
+9) Disclaimers.
+Services “AS IS”; mídia paga depende de terceiros/mercado.
+
+10) Liability Cap.
+Até os fees pagos nos 2 meses anteriores ao claim.
+
+11) Termination.
+30 dias por conveniência; 10 dias para cura em caso de breach.
+
+12) Non-Solicitation.
+12 meses após o término.
+
+13) Compliance.
+Cliente responsável por regulamentações e políticas de anúncios.
+
+14) Governing Law.
+Florida; Orange County.
+
+15) Entire Agreement.
+MSA + SOW.
+"""
+        t = ContractTemplate(name="Default MSA (EN/PT mix)", body=default_body, is_default=True)
+        db.session.add(t)
+        db.session.commit()
+
+
+with app.app_context():
+    db.create_all()
+    seed_admin()
+    seed_default_contract_template()
+
+# --- Email helper (reads from .env; reuses existing send_email() if present) ---
+
+def _env(key, default=None):
+    return os.environ.get(key, default)
+
+def _send_email_fallback(subject: str, html: str, to: list[str] | str,
+                         bcc: list[str] | str | None = None,
+                         text: str | None = None):
+    """Plain SMTP fallback using SMTP_* variables from .env."""
+    if isinstance(to, str):
+        to = [to]
+    if bcc and isinstance(bcc, str):
+        bcc = [bcc]
+
+    msg = EmailMessage()
+    msg["From"] = _env("SMTP_FROM", _env("SMTP_USER", ""))
+    msg["To"]   = ", ".join([t for t in to if t])
+    if bcc:
+        msg["Bcc"] = ", ".join([b for b in bcc if b])
+    msg["Subject"] = subject
+
+    # Derive a simple text version if not provided
+    if not text:
+        text = (html.replace("<br>", "\n")
+                   .replace("<br/>", "\n")
+                   .replace("<br />", "\n")
+                   .replace("&nbsp;", " "))
+
+    msg.set_content(text)
+    msg.add_alternative(html, subtype="html")
+
+    host = _env("SMTP_HOST", "smtp.gmail.com")
+    port = int(_env("SMTP_PORT", "587"))
+    user = _env("SMTP_USER", "")
+    pwd  = _env("SMTP_PASSWORD", "")
+
+    with smtplib.SMTP(host, port) as s:
+        s.set_debuglevel(1 if SMTP_DEBUG else 0)
+        s.starttls()
+        if user:
+            s.login(user, pwd)
+        s.send_message(msg)
+
+def _html_to_text(html: str) -> str:
+    # very lightweight conversion just for fallback/plain
+    return (html or "").replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n").replace("&nbsp;", " ")
+
+def send_mail_4uit(subject: str, html: str, to: list[str] | str,
+                   bcc: list[str] | str | None = None,
+                   text: str | None = None):
+    """
+    Prefer the project's native send_email(...) utility (handles BCC via EMAIL_BCC).
+    If it fails, fallback to raw SMTP.
+    """
+    if isinstance(to, str):
+        to_list = [to]
+    else:
+        to_list = [t for t in to if t]
+
+    text_body = text or _html_to_text(html)
+    html_body = html or (text or "")
+
+    try:
+        # Use your native sender — it already appends EMAIL_BCC internally
+        return send_email(
+            subject=subject,
+            text_body=text_body,
+            html_body=html_body,
+            to_addrs=to_list,
+            cc_addrs=None,
+            attachments=None
+        )
+    except Exception as e:
+        # Log and fallback to raw SMTP
+        current_app.logger.warning("send_mail_4uit: native send_email failed (%s). Falling back to SMTP.", e)
+        # If caller passed an explicit BCC, preserve it on fallback
+        return _send_email_fallback(subject, html_body, to_list, bcc=bcc, text=text_body)
+
+def _asset_public_review_link(asset):
+    """Builds a public review URL (prefer public token, fallback to portal route)."""
+    base = request.host_url.rstrip("/")
+    if getattr(asset, "public_token", None):
+        return f"{base}/review/{asset.public_token}"
+    return f"{base}{url_for('portal_asset_review', asset_id=asset.id)}"
+
+def notify_client_asset_needs_review(asset):
+    """
+    Email the CLIENT when the team uploads/creates an asset that needs review.
+    Recipient: client.contact_email; fallback: NOTIFY_TO.
+    """
+    from models import Client  # local import to avoid circular deps
+
+    client = getattr(asset, "client", None) or Client.query.get(getattr(asset, "client_id", None))
+    to = (client.contact_email if client and client.contact_email else None) or _env("NOTIFY_TO")
+    if not to:
+        return False
+
+    bcc = _env("EMAIL_BCC")  # optional
+    link = _asset_public_review_link(asset)
+    subject = f"[4UIT] Asset awaiting your review: {asset.title or f'#{asset.id}'}"
+    html = f"""
+    <div style="font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:14px">
+      <p>Hello{(' ' + (client.company_name or '')) if client else ''},</p>
+      <p>There is a new item waiting for your approval:</p>
+      <p><strong>{asset.title or 'Asset'}</strong></p>
+      <p><a href="{link}" target="_blank" rel="noopener">Click here to review and approve</a></p>
+      <hr><p style="color:#6b7280">4UIT • Marketing & Software</p>
+    </div>
+    """
+    return send_mail_4uit(subject, html, to=to, bcc=bcc)
+
+def notify_team_asset_review_feedback(asset, review, action_label: str):
+    """
+    Email the TEAM when the CLIENT approves/rejects and leaves comments.
+    Recipient: client.account_manager_email; fallback: NOTIFY_TO; BCC: EMAIL_BCC.
+    """
+    from models import Client
+
+    client = getattr(asset, "client", None) or Client.query.get(getattr(asset, "client_id", None))
+    to = None
+    if client and getattr(client, "account_manager_email", None):
+        to = client.account_manager_email
+    if not to:
+        to = _env("NOTIFY_TO")
+    if not to:
+        return False
+
+    bcc = _env("EMAIL_BCC")
+    link = _asset_public_review_link(asset)
+    subject = f"[4UIT] Client {action_label} • {asset.title or f'#{asset.id}'}"
+    comments = ""
+    if review and getattr(review, "comments", None):
+        comments = f"<p><strong>Client comments:</strong><br>{review.comments}</p>"
+
+    html = f"""
+    <div style="font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:14px">
+      <p><strong>Client:</strong> {(client.company_name if client else '-') }</p>
+      <p><strong>Action:</strong> {action_label}</p>
+      <p><strong>Asset:</strong> {asset.title or f'#{asset.id}'}</p>
+      {comments}
+      <p><a href="{link}" target="_blank" rel="noopener">Open asset</a></p>
+      <hr><p style="color:#6b7280">4UIT • Marketing & Software</p>
+    </div>
+    """
+    return send_mail_4uit(subject, html, to=to, bcc=bcc)
+
+
+# -------------------------------------------------
+# Helpers
+# -------------------------------------------------
+def utcnow():
+    return datetime.now(timezone.utc)
+
+
+def get_request_ip():
+    forwarded = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+    return forwarded or request.remote_addr or "0.0.0.0"
+
+
+def save_signature_data_url(data_url: str) -> str:
+    if not data_url.startswith("data:image"):
+        raise ValueError("Invalid signature data URL")
+    header, b64data = data_url.split(",", 1)
+    if "image/svg" in header:
+        ext = "svg"
+    elif "image/jpeg" in header:
+        ext = "jpg"
+    else:
+        ext = "png"
+
+    filename = f"{uuid.uuid4().hex}.{ext}"
+    rel_path = os.path.join("uploads", "signatures", filename)
+    abs_path = os.path.join(BASE_DIR, rel_path)
+    with open(abs_path, "wb") as f:
+        f.write(base64.b64decode(b64data))
+
+    # Normalizar: fundo transparente + traço preto (sem quadro)
+    if PIL_AVAILABLE:
+        _normalize_signature_image(abs_path)
+
+    return rel_path
+
+
+def _normalize_signature_image(abs_path: str) -> None:
+    """
+    Converte assinatura (mesmo que venha branca em fundo preto)
+    para PNG com fundo transparente e traço preto.
+    """
+    try:
+        from PIL import Image, ImageOps, ImageStat
+
+        # tons de cinza
+        g = Image.open(abs_path).convert("L")
+
+        # se a média for escura, provavelmente é traço branco em fundo preto → inverte
+        mean = ImageStat.Stat(g).mean[0]
+        if mean < 128:
+            g = ImageOps.invert(g)
+
+        # Alpha = intensidade do traço (darker → mais opaco)
+        alpha = ImageOps.invert(g)
+        # limpar ruído muito leve
+        alpha = alpha.point(lambda p: 0 if p < 16 else (255 if p > 220 else p))
+
+        # compor RGBA: preto com alpha da máscara
+        import PIL
+        rgba = Image.new("RGBA", g.size, (0, 0, 0, 0))
+        black = Image.new("RGBA", g.size, (0, 0, 0, 255))
+        rgba.paste(black, (0, 0), mask=alpha)
+        rgba.save(abs_path, "PNG")
+    except Exception:
+        # se algo falhar, mantemos o arquivo original
+        pass
+
+
+def is_safe_next(next_url: str) -> bool:
+    return bool(next_url and next_url.startswith("/"))
+
+
+def admin_required(view):
+    @wraps(view)
+    @login_required
+    def wrapper(*args, **kwargs):
+        if getattr(current_user, "role", None) != "admin":
+            flash("You must be admin to access this area.", "warning")
+            return redirect(url_for("login"))
+        return view(*args, **kwargs)
+    return wrapper
+
+
+def _allowed_ext(name: str) -> bool:
+    ext = (name.rsplit(".", 1)[-1] or "").lower()
+    return ext in {"png", "jpg", "jpeg", "gif", "webp", "mp4", "mov", "webm", "pdf", "mkv"}
+
+
+def _is_image(mime: str, ext: str) -> bool:
+    return (mime or "").startswith("image/") or ext in {"png", "jpg", "jpeg", "gif", "webp"}
+
+
+def _gen_thumb(src_path: str, thumb_path: str, max_size=(480, 480)):
+    if not PIL_AVAILABLE:
+        return
+    try:
+        with Image.open(src_path) as im:
+            # Converte paleta com transparência para RGBA para evitar warning
+            if im.mode == "P":
+                try:
+                    im = im.convert("RGBA")
+                except Exception:
+                    im = im.convert("RGB")
+            elif im.mode not in ("RGB", "RGBA"):
+                im = im.convert("RGBA" if "A" in im.getbands() else "RGB")
+
+            im.thumbnail(max_size)
+            if im.mode == "RGBA":
+                # fundo branco para JPEG
+                from PIL import Image as _PILImage
+                bg = _PILImage.new("RGB", im.size, (255, 255, 255))
+                bg.paste(im, mask=im.split()[3])
+                im = bg
+
+            im.save(thumb_path, "JPEG", quality=82)
+    except Exception as e:
+        app.logger.warning("thumbnail generation failed: %s", e)
+
+
+
+def ensure_public_token(asset: Asset):
+    if not asset.public_token:
+        asset.public_token = secrets.token_urlsafe(24)
+        db.session.add(asset)
+
+
+def _serializer(salt: str):
+    return URLSafeTimedSerializer(app.config["SECRET_KEY"], salt=salt)
+
+def make_onboarding_token(client_id: int) -> str:
+    return _serializer("4uit-onb").dumps({"cid": client_id})
+
+def decode_onboarding_token(token: str, max_age_seconds: int = 60*60*24*14) -> dict:
+    return _serializer("4uit-onb").loads(token, max_age=max_age_seconds)
+
+def make_setpwd_token(email: str) -> str:
+    return _serializer("4uit-setpwd").dumps({"email": email})
+
+def decode_setpwd_token(token: str, max_age_seconds: int = 60*60*24*7) -> dict:
+    return _serializer("4uit-setpwd").loads(token, max_age=max_age_seconds)
+
+def normalize_signature_png(src_path: str) -> str:
+    """
+    Converte qualquer pixel visível da assinatura para PRETO opaco (#000, alpha 255),
+    mantendo fundo totalmente transparente. Retorna o caminho do novo PNG.
+    """
+    if not PIL_AVAILABLE:
+        return src_path
+    try:
+        im = Image.open(src_path).convert("RGBA")
+        px = im.load()
+        w, h = im.size
+        for y in range(h):
+            for x in range(w):
+                r, g, b, a = px[x, y]
+                if a > 16:              # qualquer traço visível
+                    px[x, y] = (0, 0, 0, 255)   # preto sólido
+                else:
+                    px[x, y] = (255, 255, 255, 0)  # totalmente transparente
+        out_path = os.path.join(UPLOAD_SIGS_DIR, f"norm_{uuid.uuid4().hex}.png")
+        im.save(out_path, "PNG")
+        return out_path
+    except Exception:
+        return src_path
+
+
+def _access_request_pdf_path(ar_id: int) -> str:
+    folder = os.path.join(BASE_DIR, "uploads", "access_requests")
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, f"access-request-{ar_id}.pdf")
+
+def _header_pdf(canvas, title: str) -> float:
+    """Cabeçalho com logo 4UIT (não invade o texto). Retorna Y inicial do conteúdo."""
+    PAGE_W, PAGE_H = LETTER
+    MARGIN_L = 72
+    MARGIN_R = 72
+    MARGIN_T = 72
+    LOGO_H = 28
+
+    y_top = PAGE_H - MARGIN_T
+    x = MARGIN_L
+    logo_path = os.path.join(BASE_DIR, "static", "img", "4uit.png")
+
+    logo_w = 0
+    if os.path.exists(logo_path):
+        try:
+            img = ImageReader(logo_path)
+            iw, ih = img.getSize()
+            logo_w = int(LOGO_H * (iw / float(ih)))
+            canvas.drawImage(
+                img, x, y_top - LOGO_H,
+                width=logo_w, height=LOGO_H,
+                preserveAspectRatio=True, mask="auto"
+            )
+        except Exception:
+            logo_w = 0
+
+    canvas.setFont("Helvetica-Bold", 14)
+    canvas.drawString(x + (logo_w + 10 if logo_w else 0), y_top - 2, title)
+    y_line = y_top - LOGO_H - 6
+    canvas.setLineWidth(0.5)
+    canvas.setStrokeColorRGB(0.7, 0.7, 0.7)
+    canvas.line(MARGIN_L, y_line, PAGE_W - MARGIN_R, y_line)
+    canvas.setStrokeColorRGB(0, 0, 0)
+    return y_line - 14
+
+def _wrap_lines_kv(canvas, key: str, value: str, y: float, max_width: float, font="Helvetica", size=10, bullet=True):
+    """Desenha uma linha '• Key: Value' com quebra automática; retorna novo y."""
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    canvas.setFont(font, size)
+
+    prefix = f"{key}: "
+    bullet_txt = "• " if bullet else ""
+    # tenta colocar '• Key: ' na mesma linha e faz wrap apenas do value
+    k_w = stringWidth(bullet_txt + prefix, font, size)
+    words = (value or "").replace("\r\n", "\n").split(" ")
+    cur = ""
+    first_line = True
+    for w in words:
+        test = (cur + " " + w).strip()
+        if stringWidth(test, font, size) <= (max_width - (k_w if first_line else 0)):
+            cur = test
+        else:
+            # desenha linha acumulada
+            if first_line:
+                canvas.drawString(72, y, bullet_txt + prefix)
+                canvas.drawString(72 + k_w, y, cur)
+                first_line = False
+            else:
+                canvas.drawString(72, y, cur)
+            y -= 14
+            cur = w
+    # última linha
+    if first_line:
+        canvas.drawString(72, y, bullet_txt + prefix)
+        canvas.drawString(72 + k_w, y, cur)
+    else:
+        canvas.drawString(72, y, cur)
+    return y - 14
+
+def _generate_contract_pdf(contract) -> str | None:
+    """
+    Gera o PDF do contrato e salva em uploads/contracts.
+    - Preenche a página até o limite antes de quebrar
+    - Cabeçalho com logotipo sem invadir o corpo
+    - Assinatura preta (usa normalize_signature_png) + trilha de auditoria
+    """
+    if not REPORTLAB_AVAILABLE:
+        return None
+
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+
+    PAGE_W, PAGE_H = LETTER
+    MARGIN_L = 72
+    MARGIN_R = 72
+    MARGIN_T = 72
+    MARGIN_B = 72
+    LINE = 14
+    CONTENT_W = PAGE_W - MARGIN_L - MARGIN_R
+    LOGO_H = 28  # altura do logo no cabeçalho
+
+    logo_path = os.path.join(BASE_DIR, "static", "img", "4uit.png")
+
+    def header(canvas, title="Master Services Agreement"):
+        """Desenha logotipo + título + linha; retorna Y inicial do conteúdo."""
+        y_top = PAGE_H - MARGIN_T
+        x = MARGIN_L
+        # Logo (se existir), respeitando proporção e sem invadir o conteúdo
+        logo_w = 0
+        if os.path.exists(logo_path):
+            try:
+                img = ImageReader(logo_path)
+                iw, ih = img.getSize()
+                logo_w = int(LOGO_H * (iw / float(ih)))
+                canvas.drawImage(
+                    img,
+                    x, y_top - LOGO_H,  # canto superior-esquerdo do logo
+                    width=logo_w, height=LOGO_H,
+                    preserveAspectRatio=True,
+                    mask="auto",
+                )
+            except Exception:
+                logo_w = 0
+
+        # Título ao lado do logo
+        canvas.setFont("Helvetica-Bold", 14)
+        canvas.drawString(x + (logo_w + 10 if logo_w else 0), y_top - 2, title)
+
+        # Linha divisória
+        y_line = y_top - LOGO_H - 6
+        canvas.setLineWidth(0.5)
+        canvas.setStrokeColorRGB(0.7, 0.7, 0.7)
+        canvas.line(MARGIN_L, y_line, PAGE_W - MARGIN_R, y_line)
+        canvas.setStrokeColorRGB(0, 0, 0)
+
+        # Espaço abaixo da linha para iniciar o conteúdo
+        return y_line - 14
+    
+ 
+
+    def wrap_lines(text: str, font_name: str = "Helvetica", font_size: int = 10):
+        out = []
+        for raw in (text or "").replace("\r\n", "\n").split("\n"):
+            words, cur = raw.split(" "), ""
+            for w in words:
+                test = (cur + " " + w).strip()
+                if stringWidth(test, font_name, font_size) <= CONTENT_W:
+                    cur = test
+                else:
+                    if cur:
+                        out.append(cur)
+                    cur = w
+            out.append(cur)
+        return out
+
+    abs_path = _contract_pdf_path(contract.id)
+    c = rl_canvas.Canvas(abs_path, pagesize=LETTER)
+
+    # Cabeçalho da primeira página
+    y = header(c)
+
+    # Metadados
+    c.setFont("Helvetica", 10)
+    meta = [
+        f"Contract ID: {contract.id}",
+        f"Client: {contract.client.company_name if contract.client else '-'}",
+        f"Signer: {contract.signer_name or '-'}",
+        f"Email: {contract.signer_email or '-'}",
+    ]
+    if contract.signed_at:
+        meta.append(f"Signed (UTC): {contract.signed_at.isoformat()}")
+    if contract.signer_ip:
+        meta.append(f"IP: {contract.signer_ip}")
+    for line in meta:
+        if y - LINE < MARGIN_B:
+            c.showPage()
+            y = header(c, "4UIT Solutions — MSA (cont.)")
+            c.setFont("Helvetica", 10)
+        c.drawString(MARGIN_L, y, line)
+        y -= LINE
+
+    # Título do corpo
+    y -= 6
+    c.setFont("Helvetica-Bold", 11)
+    if y - LINE < MARGIN_B:
+        c.showPage()
+        y = header(c, "4UIT Solutions — MSA (cont.)")
+    c.drawString(MARGIN_L, y, "Contract text:")
+    y -= LINE
+
+    # Corpo (sem reservar espaço antecipado: preenche a página toda)
+    c.setFont("Helvetica", 10)
+    for line in wrap_lines(contract.contract_text or ""):
+        if y - LINE < MARGIN_B:
+            c.showPage()
+            y = header(c, "4UIT Solutions — MSA (cont.)")
+            c.setFont("Helvetica", 10)
+        c.drawString(MARGIN_L, y, line)
+        y -= LINE
+
+    # ——— Bloco de assinatura e auditoria ———
+    # Dimensões do bloco
+    sig_w = min(CONTENT_W, 460)
+    sig_h = 0
+    if contract.signature_path:
+        try:
+            sig_abs = os.path.join(BASE_DIR, contract.signature_path.replace("/", os.sep))
+            if os.path.exists(sig_abs):
+                sig_norm = normalize_signature_png(sig_abs)  # mantém traço preto
+                from PIL import Image as _PILImage
+                im = _PILImage.open(sig_norm)
+                iw, ih = im.size
+                scale = sig_w / float(iw)
+                sig_h = int(ih * scale)
+        except Exception:
+            sig_h = 110  # fallback
+
+    # Altura prevista: título + metadados (até 4 linhas) + assinatura + respiro
+    meta_lines = 2 + (1 if contract.signed_at else 0) + (1 if contract.signer_ip else 0)
+    needed = 20 + (meta_lines * LINE) + (sig_h or 110) + 10
+
+    if y - needed < MARGIN_B:
+        c.showPage()
+        y = header(c, "")
+
+    # Cabeçalho da seção
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(MARGIN_L, y, "Signature")
+    y -= 20
+
+    # Metadados da assinatura
+    c.setFont("Helvetica", 10)
+    c.drawString(MARGIN_L, y, f"Client: {contract.client.company_name if contract.client else '-'}"); y -= LINE
+    c.drawString(MARGIN_L, y, f"Signer: {contract.signer_name or '-'} <{contract.signer_email or '-'}>"); y -= LINE
+    if contract.signed_at:
+        c.drawString(MARGIN_L, y, f"Signed (UTC): {contract.signed_at.isoformat()}"); y -= LINE
+    if contract.signer_ip:
+        c.drawString(MARGIN_L, y, f"IP: {contract.signer_ip}"); y -= LINE
+    y -= 6
+
+    # Imagem da assinatura (preta, sem fundo) se existir
+    if contract.signature_path:
+        try:
+            sig_abs = os.path.join(BASE_DIR, contract.signature_path.replace("/", os.sep))
+            if os.path.exists(sig_abs):
+                sig_norm = normalize_signature_png(sig_abs)
+                img = ImageReader(sig_norm)
+                c.drawImage(
+                    img,
+                    MARGIN_L, y - sig_h,
+                    width=sig_w, height=sig_h,
+                    preserveAspectRatio=True,
+                    anchor="nw"
+                    # sem mask: já está com fundo transparente e traço preto
+                )
+                y -= sig_h + 6
+        except Exception:
+            pass
+
+    c.save()
+    return abs_path
+
+
+
+def _generate_access_request_pdf(ar: "AccessRequest") -> str:
+    """Gera PDF da versão de Access Request, preenchendo página até o limite, com histórico/auditoria."""
+    abs_path = _access_request_pdf_path(ar.id)
+    c = rl_canvas.Canvas(abs_path, pagesize=LETTER)
+
+    PAGE_W, PAGE_H = LETTER
+    MARGIN_L = 72
+    MARGIN_R = 72
+    MARGIN_B = 72
+    LINE = 14
+    CONTENT_W = PAGE_W - MARGIN_L - MARGIN_R
+
+    # Cabeçalho
+    y = _header_pdf(c, "4UIT Solutions — Access Information")
+
+    # Metadados
+    c.setFont("Helvetica", 10)
+    metas = [
+        f"Version ID: {ar.id}",
+        f"Client: {ar.client.company_name if ar.client else '-'}",
+        f"Submitted at (UTC): {ar.submitted_at.isoformat() if ar.submitted_at else '-'}",
+        f"Submitted by: {ar.submitted_by or '-'}",
+        f"E-mail: {ar.submitted_email or '-'}",
+        f"IP: {ar.submitted_ip or '-'}",
+    ]
+    for m in metas:
+        if y - LINE < MARGIN_B:
+            c.showPage(); y = _header_pdf(c, "4UIT Solutions — Access Information (cont.)"); c.setFont("Helvetica", 10)
+        c.drawString(MARGIN_L, y, m); y -= LINE
+
+    # Título
+    y -= 6
+    c.setFont("Helvetica-Bold", 11)
+    if y - LINE < MARGIN_B:
+        c.showPage(); y = _header_pdf(c, "4UIT Solutions — Access Information (cont.)")
+    c.drawString(MARGIN_L, y, "Access data:"); y -= LINE
+
+    # Dados (Key → Value) com quebra automática
+    c.setFont("Helvetica", 10)
+    data = ar.data or {}
+    # ordena por chave para ficar estável
+    for k in sorted(data.keys()):
+        v = data[k]
+        v_txt = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, indent=None)
+        if y - LINE < MARGIN_B:
+            c.showPage(); y = _header_pdf(c, "4UIT Solutions — Access Information (cont.)"); c.setFont("Helvetica", 10)
+        y = _wrap_lines_kv(c, key=str(k), value=str(v_txt), y=y, max_width=CONTENT_W)
+
+    c.save()
+    return abs_path
+
+
+def _safe_generate_contract_pdf(contract):
+    """
+    Tenta gerar o PDF do contrato. Se a função original não existir
+    ou o ReportLab não estiver disponível, apenas retorna None.
+    """
+    try:
+        return _generate_contract_pdf(contract)  # usa a sua função se existir
+    except NameError:
+        return None
+    except Exception:
+        return None
+
+
+# Jinja filter: highlight
+@app.template_filter("hl")
+def jinja_highlight(text, q):
+    if not text or not q:
+        return text
+    try:
+        pattern = re.compile(re.escape(q), re.IGNORECASE)
+        esc = escape(str(text))
+        result = pattern.sub(lambda m: Markup(f"<mark>{escape(m.group(0))}</mark>"), str(esc))
+        return Markup(result)
+    except Exception:
+        return text
+
+
+# ------------------ Email ------------------
+SMTP_HOST = os.getenv("SMTP_HOST", os.getenv("SMTP_SERVER", "smtp.office365.com"))
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+SMTP_TLS = (os.getenv("SMTP_TLS", "true").lower() != "false")
+SMTP_FROM = os.getenv("SMTP_FROM") or SMTP_USER or "no-reply@4uit.us"
+EMAIL_BCC = os.getenv("EMAIL_BCC")  # optional
+
+
+def _split_emails(s: str | None):
+    if not s:
+        return []
+    return [x.strip() for x in s.split(",") if x.strip()]
+
+
+def send_email(subject: str, text_body: str, html_body: str,
+               to_addrs: list[str], cc_addrs: list[str] | None = None,
+               attachments: list[tuple[str, str]] | None = None):
+    if not (SMTP_HOST and SMTP_USER and SMTP_PASSWORD):
+        raise RuntimeError("SMTP not configured (.env).")
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = SMTP_FROM
+    msg["To"] = ", ".join(to_addrs)
+    if cc_addrs:
+        msg["Cc"] = ", ".join(cc_addrs)
+    bcc_list = _split_emails(EMAIL_BCC)
+    all_rcpts = list(to_addrs) + (cc_addrs or []) + bcc_list
+
+    msg.set_content(text_body or "")
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
+
+    for abs_path, filename in (attachments or []):
+        ctype, _ = mimetypes.guess_type(abs_path)
+        maintype, subtype = (ctype.split("/", 1) if ctype else ("application", "octet-stream"))
+        with open(abs_path, "rb") as f:
+            msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=filename)
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as s:
+        s.ehlo()
+        if SMTP_TLS:
+            s.starttls()
+        s.login(SMTP_USER, SMTP_PASSWORD)
+        s.send_message(msg, from_addr=SMTP_FROM, to_addrs=all_rcpts)
+
+
+# -------------------------------------------------
+# Util
+# -------------------------------------------------
+@app.get("/admin/assets/ensure-tokens")
+@admin_required
+def admin_assets_ensure_tokens():
+    missing = Asset.query.filter(Asset.public_token.is_(None)).all()
+    for a in missing:
+        ensure_public_token(a)
+    db.session.commit()
+    return jsonify({"ok": True, "updated": len(missing)})
+
+
+# -------------------------------------------------
+# Public pages
+# -------------------------------------------------
+@app.get("/")
+def home():
+    return render_template("home.html")
+
+
+@app.get("/contract")
+def contract_page():
+    """
+    Aceita:
+      - ?client_id=123 (preferência)
+      - ou ?company=&email= para pré-preencher campos
+      - ?tpl=ID para forçar template
+    """
+    client_id = request.args.get("client_id", type=int)
+    tpl_id = request.args.get("tpl", type=int)
+    prefill_email = (request.args.get("email") or "").strip()
+    prefill_company = (request.args.get("company") or "").strip()
+    contract_text = None
+
+    client = Client.query.get(client_id) if client_id else None
+    if client:
+        prefill_company = prefill_company or (client.company_name or "")
+        if not prefill_email:
+            prefill_email = (client.contact_email or "")
+
+        pref = ClientContractPref.query.filter_by(client_id=client.id).first()
+        if pref:
+            if pref.override_text:
+                contract_text = pref.override_text
+            elif pref.template:
+                contract_text = pref.template.body
+
+    if not contract_text and tpl_id:
+        tpl = ContractTemplate.query.get(tpl_id)
+        if tpl:
+            contract_text = tpl.body
+
+    if not contract_text:
+        tpl = ContractTemplate.query.filter_by(is_default=True).order_by(ContractTemplate.id.desc()).first()
+        if not tpl:
+            tpl = ContractTemplate.query.order_by(ContractTemplate.id.asc()).first()
+        contract_text = tpl.body if tpl else "No contract template found. Please contact 4UIT."
+
+    return render_template(
+        "marketing_contract.html",
+        contract_text=contract_text,
+        prefill_company=prefill_company,
+        prefill_email=prefill_email,
+    )
+
+
+@app.get("/access-request")
+def access_request_page():
+    prefill_company = (request.args.get("company") or "").strip()
+    prefill_email = (request.args.get("email") or "").strip()
+    return render_template("access_request.html",
+                           prefill_company=prefill_company,
+                           prefill_email=prefill_email)
+
+
+# -------------------------------------------------
+# Login / Logout
+# -------------------------------------------------
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        email = (request.form.get("email") or "").strip().lower()
+        password = request.form.get("password") or ""
+        remember = bool(request.form.get("remember"))
+        user = User.query.filter_by(email=email).first()
+
+        if user and user.check_password(password):
+            login_user(user, remember=remember)
+
+            # honor ?next= if it's a safe local path
+            nxt = request.args.get("next") or request.form.get("next")
+            if nxt and is_safe_next(nxt):
+                return redirect(nxt)
+
+            # role-based landing
+            dest = "admin_home" if getattr(user, "role", "") == "admin" else "portal_home"
+            return redirect(url_for(dest))
+
+        # invalid credentials
+        flash("Invalid credentials.", "danger")
+        return redirect(url_for("login"))
+
+    # GET
+    return render_template("login.html", next=request.args.get("next"))
+
+
+@app.get("/logout")
+@login_required
+def logout():
+    logout_user()
+    flash("Signed out.", "info")
+    return redirect(url_for("login"))
+
+
+# -------------------------------------------------
+# APIs
+# -------------------------------------------------
+def _access_sig_dir():
+    p = os.path.join(BASE_DIR, "uploads", "access_signatures")
+    os.makedirs(p, exist_ok=True)
+    return p
+
+def _access_pdf_dir():
+    p = os.path.join(BASE_DIR, "uploads", "access_pdfs")
+    os.makedirs(p, exist_ok=True)
+    return p
+
+def _access_pdf_path(ar_id: int) -> str:
+    """Retorna o caminho absoluto do PDF do Access Request."""
+    folder = os.path.join(BASE_DIR, "uploads", "access", "pdf")
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, f"access-{ar_id}.pdf")
+
+def _contract_pdf_path(contract_id: int) -> str:
+    return os.path.join(UPLOAD_CONTRACTS_DIR, f"contract_{contract_id}.pdf")
+
+def _generate_access_pdf(ar) -> str | None:
+    """
+    Gera o PDF com os dados do Access Request e assinatura.
+    Estilo alinhado ao contrato: cabeçalho com logo, primeira página preenchida
+    ao máximo antes de quebrar, e trilha de auditoria + assinatura.
+    """
+    if not REPORTLAB_AVAILABLE:
+        return None
+
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.pdfgen import canvas as rl_canvas
+    from reportlab.lib.utils import ImageReader
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+
+    # Layout base
+    PAGE_W, PAGE_H = LETTER
+    MARGIN_L = 72
+    MARGIN_R = 72
+    MARGIN_T = 72
+    MARGIN_B = 72
+    LINE = 14
+    CONTENT_W = PAGE_W - MARGIN_L - MARGIN_R
+
+    def wrap(text, font="Helvetica", size=10):
+        out = []
+        for raw in (text or "").replace("\r\n", "\n").split("\n"):
+            words, cur = raw.split(" "), ""
+            for w in words:
+                test = (cur + " " + w).strip()
+                if stringWidth(test, font, size) <= CONTENT_W:
+                    cur = test
+                else:
+                    if cur: out.append(cur)
+                    cur = w
+            out.append(cur)
+        return out
+
+    path = _access_pdf_path(ar.id)
+    c = rl_canvas.Canvas(path, pagesize=LETTER)
+
+    y = PAGE_H - MARGIN_T
+
+    # Cabeçalho com logo (não invade área do texto)
+    try:
+        logo_abs = os.path.join(BASE_DIR, "static", "img", "4uit.png")
+        if os.path.exists(logo_abs):
+            img = ImageReader(logo_abs)
+            logo_h = 28
+            logo_w = 28
+            c.drawImage(img, MARGIN_L, y - logo_h + 4, width=logo_w, height=logo_h, mask='auto')
+            c.setFont("Helvetica-Bold", 14)
+            c.drawString(MARGIN_L + logo_w + 10, y, "4UIT Solutions — Access Information")
+        else:
+            c.setFont("Helvetica-Bold", 14)
+            c.drawString(MARGIN_L, y, "4UIT Solutions — Access Information")
+    except Exception:
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(MARGIN_L, y, "4UIT Solutions — Access Information")
+
+    y -= 22
+    c.setLineWidth(0.6)
+    c.line(MARGIN_L, y, PAGE_W - MARGIN_R, y)
+    y -= 12
+
+    # Auditoria
+    c.setFont("Helvetica", 10)
+    client_name = "-"
+    if getattr(ar, "client", None):
+        client_name = ar.client.company_name or "-"
+    elif getattr(ar, "client_company", None):
+        client_name = ar.client_company or "-"
+
+    audit = [
+        f"Client: {client_name}",
+        f"Signer: {ar.signer_name or '-'} <{ar.signer_email or '-'}>",
+        f"Submitted (UTC): {ar.submitted_at.isoformat() if ar.submitted_at else '-'}",
+    ]
+    if getattr(ar, "signer_ip", None):
+        audit.append(f"IP: {ar.signer_ip}")
+
+    for line in audit:
+        c.drawString(MARGIN_L, y, line); y -= LINE
+
+    y -= 6
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(MARGIN_L, y, "Access details")
+    y -= LINE
+    c.setFont("Helvetica", 10)
+
+    # Campos principais
+    pairs = [
+        ("Instagram (user)", ar.instagram_user),
+        ("Facebook Page", ar.facebook_page),
+        ("Meta BM ID", ar.meta_bm_id),
+        ("Meta Ads Account", ar.meta_ads_account_id),
+        ("Google Ads ID", ar.google_ads_id),
+        ("Website URL", ar.website_url),
+        ("Hosting", ar.hosting),
+        ("Hosting Login", ar.hosting_login),
+        ("Hosting Password", ar.hosting_password),
+        ("Domain Registrar", ar.domain_registrar),
+        ("Domain Login", ar.domain_login),
+        ("Domain Password", ar.domain_password),
+        ("Brand notes", ar.brand_notes),
+    ]
+
+    for label, value in pairs:
+        txt = f"{label}: {value or '-'}"
+        lines = wrap(txt, size=10)
+        for ln in lines:
+            if y <= MARGIN_B + 220:
+                c.showPage(); y = PAGE_H - MARGIN_T
+                c.setFont("Helvetica-Bold", 12)
+                c.drawString(MARGIN_L, y, "Access Information (cont.)")
+                y -= 18
+                c.setFont("Helvetica", 10)
+            c.drawString(MARGIN_L, y, ln)
+            y -= LINE
+        y -= 2
+
+    # Assinatura
+    block_title = 18
+    sig_h_est = 160
+    needed = block_title + sig_h_est + 10 + (3 * LINE)
+
+    if y - needed < MARGIN_B:
+        c.showPage(); y = PAGE_H - MARGIN_T
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(MARGIN_L, y, "Signature")
+    y -= 18
+
+    c.setFont("Helvetica", 10)
+    c.drawString(MARGIN_L, y, f"Client: {client_name}"); y -= LINE
+    c.drawString(MARGIN_L, y, f"Signer: {ar.signer_name or '-'} <{ar.signer_email or '-'}>"); y -= LINE
+    if ar.submitted_at:
+        c.drawString(MARGIN_L, y, f"Submitted (UTC): {ar.submitted_at.isoformat()}"); y -= LINE
+    y -= 6
+
+    if ar.signature_path:
+        try:
+            sig_abs = os.path.join(BASE_DIR, ar.signature_path.replace("/", os.sep))
+            if os.path.exists(sig_abs):
+                sig_use = sig_abs
+                try:
+                    sig_use = normalize_signature_png(sig_abs)
+                except Exception:
+                    pass
+
+                from PIL import Image as _PILImage
+                iw, ih = _PILImage.open(sig_use).size
+                max_w = min(CONTENT_W, 460)
+                scale = max_w / float(iw)
+                sig_w = max_w
+                sig_h = int(ih * scale)
+
+                img = ImageReader(sig_use)
+                c.drawImage(img, MARGIN_L, y - sig_h, width=sig_w, height=sig_h,
+                            preserveAspectRatio=True, anchor='nw')
+                y -= sig_h + 6
+        except Exception:
+            pass
+
+    c.save()
+    return path
+
+
+@app.post("/api/whoami")
+@app.get("/api/whoami")
+def whoami():
+    return jsonify({
+        "ip": get_request_ip(),
+        "user_agent": request.headers.get("User-Agent", "")
+    })
+
+
+@app.post("/api/signature")
+def api_signature():
+    data = request.get_json() or {}
+    required = ["client_company", "signer_name", "signer_email", "signature_data_url", "contract_text"]
+    missing = [k for k in required if not data.get(k)]
+    if missing:
+        return jsonify({"ok": False, "error": f"Missing fields: {', '.join(missing)}"}), 400
+
+    # --- client
+    client = Client.query.filter_by(company_name=data["client_company"]).first()
+    if not client:
+        client = Client(
+            company_name=data["client_company"],
+            ein=data.get("client_ein"),
+            address=data.get("client_address"),
+            legal_representative=data.get("client_legal_rep"),
+            contact_email=data.get("signer_email"),
+        )
+        db.session.add(client)
+        db.session.flush()
+
+    # --- assinatura (salva imagem/PNG do draw-pad)
+    try:
+        signature_path = save_signature_data_url(data["signature_data_url"])
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Invalid signature: {e}"}), 400
+
+    contract = Contract(
+        client_id=client.id,
+        signer_name=data["signer_name"],
+        signer_email=data["signer_email"],
+        signed_at=utcnow(),
+        signer_ip=get_request_ip(),
+        user_agent=request.headers.get("User-Agent", ""),
+        signature_path=signature_path,
+        contract_text=data.get("contract_text", ""),
+    )
+    db.session.add(contract)
+    db.session.commit()
+
+    # --- cria/garante usuário cliente + link set-password
+    sp_link = None
+    try:
+        signer_email = (data.get("signer_email") or "").strip().lower()
+        signer_name = (data.get("signer_name") or "").strip() or (client.company_name or "Client")
+        if signer_email:
+            u = User.query.filter_by(email=signer_email).first()
+            if not u:
+                u = User(name=signer_name, email=signer_email, role="client")
+                u.set_password(secrets.token_urlsafe(12))  # temp
+                db.session.add(u)
+                db.session.commit()
+            else:
+                if u.role not in ("admin", "client"):
+                    u.role = "client"
+                    db.session.commit()
+            sp_token = make_setpwd_token(signer_email)
+            sp_link = url_for("set_password", token=sp_token, _external=True)
+    except Exception:
+        # não falhar a rota por causa da criação do usuário
+        pass
+
+    # --- gera PDF e prepara anexo
+    attachments = []
+    pdf_abs = _safe_generate_contract_pdf(contract)
+    if pdf_abs and os.path.exists(pdf_abs):
+        attachments.append((pdf_abs, f"4UIT-contract-{contract.id}.pdf"))
+
+    # --- e-mail ao cliente (assinado)
+    try:
+        brand = "4UIT Solutions"
+        portal_link = url_for("portal_home", _external=True)
+        subject = f"Your contract with 4UIT — signed (#{contract.id})"
+
+        # texto simples
+        text_lines = [
+            f"Hi {contract.signer_name},",
+            "",
+            "Your contract has been signed successfully.",
+            "",
+            f"Contract ID: {contract.id}",
+            f"Client: {client.company_name if client else '-'}",
+            "",
+            "You can access your portal here:",
+            f"{portal_link}",
+            "",
+        ]
+        if sp_link:
+            text_lines.append("Set your password here:")
+            text_lines.append(sp_link)
+        else:
+            text_lines.append("If you already set a password, just sign in.")
+        text_lines.extend(["", "The signed PDF is attached.", "", "Thanks,", brand])
+
+        text_body = "\n".join(text_lines)
+
+        # HTML seguro (pré-computa trechos dinâmicos)
+        signer_name_safe = escape(contract.signer_name or "")
+        client_name_safe = escape(client.company_name or "-") if client else "-"
+        portal_link_safe = portal_link
+
+        if sp_link:
+            password_html = f'<span>Set your password: </span><a href="{sp_link}">{sp_link}</a>'
+        else:
+            password_html = '<em>If you already set a password, just sign in.</em>'
+
+        html_body = (
+            '<div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif">'
+            f'<h2 style="margin:0 0 8px">{brand}</h2>'
+            f'<p>Hi <strong>{signer_name_safe}</strong>,</p>'
+            '<p>Your contract has been signed successfully.</p>'
+            '<p style="margin:10px 0">'
+            f'<strong>Contract ID:</strong> {contract.id}<br/>'
+            f'<strong>Client:</strong> {client_name_safe}'
+            '</p>'
+            f'<p>Access your portal: <a href="{portal_link_safe}">{portal_link_safe}</a><br/>{password_html}</p>'
+            '<p>The signed PDF is attached.</p>'
+            f'<p>Thanks,<br/>{brand}</p>'
+            '</div>'
+        )
+
+        to_addrs = [contract.signer_email]
+        cc_list = []
+        admin_notify = _split_emails(os.getenv("ADMIN_EMAIL")) or _split_emails(os.getenv("NOTIFY_TO"))
+        if admin_notify:
+            cc_list.extend(admin_notify)
+
+        send_email(
+            subject=subject,
+            text_body=text_body,
+            html_body=html_body,
+            to_addrs=to_addrs,
+            cc_addrs=cc_list,
+            attachments=attachments,
+        )
+    except Exception:
+        # não bloquear a confirmação por erro de envio de e-mail
+        pass
+
+    sig_url = "/" + contract.signature_path.replace("\\", "/")
+
+    return jsonify({
+        "ok": True,
+        "message": "Signature stored successfully.",
+        "signed_at_utc": contract.signed_at.isoformat(),
+        "signer_ip": contract.signer_ip,
+        "signature_url": sig_url,
+        "client_id": client.id,
+        "contract_id": contract.id
+    })
+
+
+
+@app.route("/set-password/<token>", methods=["GET", "POST"])
+def set_password(token: str):
+    try:
+        data = decode_setpwd_token(token)
+        email = (data.get("email") or "").strip().lower()
+    except (BadSignature, SignatureExpired, KeyError):
+        flash("Invalid or expired link.", "danger")
+        return redirect(url_for("login"))
+
+    u = User.query.filter_by(email=email).first_or_404()
+
+    if request.method == "POST":
+        pw = (request.form.get("password") or "").strip()
+        pw2 = (request.form.get("password2") or "").strip()
+        if len(pw) < 8:
+            flash("Password must have at least 8 characters.", "danger")
+            return redirect(request.url)
+        if pw != pw2:
+            flash("Passwords do not match.", "danger")
+            return redirect(request.url)
+        u.set_password(pw)
+        db.session.commit()
+        flash("Password set successfully. You can sign in now.", "success")
+        return redirect(url_for("login"))
+
+    return render_template("set_password.html", email=email)
+
+
+# --- API: Access Request ------------------------------------------------------
+@app.post("/api/access-request")
+@login_required
+def api_access_request():
+    data = request.get_json(force=True) or {}
+
+    # 1) Resolve Client (lookup por nome; cria se não existir)
+    company_name = (data.get("client_company") or "").strip()
+    signer_email = (data.get("signer_email") or "").strip()
+
+    client = None
+    if company_name:
+        client = Client.query.filter_by(company_name=company_name).first()
+        if not client:
+            client = Client(company_name=company_name, contact_email=signer_email)
+            db.session.add(client)
+            db.session.flush()  # garante client.id
+
+    # 2) Salva assinatura caso tenha vindo como dataURL
+    sig_relpath = None
+    sig_data_url = data.get("signature_data_url") or ""
+    if sig_data_url.startswith("data:image"):
+        try:
+            b64 = sig_data_url.split(",", 1)[1]
+            raw = base64.b64decode(b64)
+            fname = f"access_{uuid.uuid4().hex}.png"
+            abs_path = os.path.join(ACCESS_SIGS_DIR, fname)          # <<< usa a constante
+            with open(abs_path, "wb") as f:
+                f.write(raw)
+            sig_relpath = f"uploads/access_signatures/{fname}"       # <<< caminho público
+        except Exception as e:
+            return jsonify(ok=False, error=f"signature decode error: {e}"), 400
+
+
+    # 3) Monta kwargs aceitos pelo modelo (filtra por colunas válidas)
+    allowed_cols = {c.name for c in AccessRequest.__table__.columns}
+    kwargs = {}
+
+    # Copia somente chaves que existem na tabela
+    for k, v in data.items():
+        if k in allowed_cols:
+            kwargs[k] = v
+
+    # Mapeia company -> client_id (se a coluna existir)
+    if client and "client_id" in allowed_cols:
+        kwargs["client_id"] = client.id
+
+    # Adiciona caminho da assinatura se a coluna existir
+    if sig_relpath and "signature_path" in allowed_cols:
+        kwargs["signature_path"] = sig_relpath
+
+    # Evita erro por campos que vieram do form e não existem no modelo
+    # (ex.: client_company, signature_data_url)
+    kwargs.pop("client_company", None)
+    kwargs.pop("signature_data_url", None)
+
+    try:
+        ar = AccessRequest(**kwargs)
+
+        # IP e autoria (defensivo, só seta se a coluna existir no modelo)
+        ip = get_request_ip()
+        if hasattr(ar, "submitted_ip"):
+            ar.submitted_ip = ip
+        if hasattr(ar, "signer_ip"):
+            ar.signer_ip = ip
+        if hasattr(ar, "submitted_by") and getattr(current_user, "email", None):
+            ar.submitted_by = current_user.email
+        if hasattr(ar, "submitted_email") and not ar.submitted_email:
+            ar.submitted_email = (data.get("signer_email") or "").strip()
+
+
+        db.session.add(ar)
+        db.session.commit()
+        return jsonify(ok=True, id=ar.id)
+    except Exception as e:
+        db.session.rollback()
+        return jsonify(ok=False, error=str(e)), 400
+
+
+@app.get("/admin/access/<int:ar_id>")
+@login_required
+def admin_access_view(ar_id):
+    ar = AccessRequest.query.options(joinedload(AccessRequest.client)).get_or_404(ar_id)
+    return render_template("/access_view.html", ar=ar)
+
+@app.get("/admin/access/<int:ar_id>/pdf")
+@login_required
+def admin_access_pdf(ar_id):
+    ar = AccessRequest.query.get_or_404(ar_id)
+    pdf_abs = _access_pdf_path(ar.id)
+    if not os.path.exists(pdf_abs):
+        _generate_access_pdf(ar)
+    return send_file(pdf_abs, as_attachment=True, download_name=f"access_{ar.id}.pdf")
+
+
+# -------------------------------------------------
+# Assets — routes (admin)
+# -------------------------------------------------
+ALLOWED_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "mp4", "mov", "mkv", "pdf"}
+
+@app.get("/assets")
+@admin_required
+def assets_list():
+    qtext = (request.args.get("q") or "").strip()
+    selected_statuses = request.args.getlist("status")
+    if not selected_statuses:
+        single_status = (request.args.get("status") or "").strip()
+        if single_status:
+            selected_statuses = [single_status]
+
+    selected_client_id = request.args.get("client_id", type=int)
+    page = max(1, request.args.get("page", default=1, type=int))
+    per_page = min(max(request.args.get("per_page", type=int, default=12), 5), 100)
+    sort = (request.args.get("sort") or "created_desc").strip()
+
+    q = Asset.query
+
+    if selected_statuses:
+        allowed = {"pending", "approved", "rejected", "posted"}
+        chosen = [s for s in selected_statuses if s in allowed]
+        if chosen:
+            q = q.filter(Asset.status.in_(chosen))
+
+    if selected_client_id:
+        q = q.filter(Asset.client_id == selected_client_id)
+
+    if qtext:
+        like = f"%{qtext}%"
+        q = q.filter(or_(Asset.title.ilike(like), Asset.description.ilike(like)))
+
+    if sort.endswith("_desc"):
+        sort_field = sort[:-5]; sort_dir = "desc"
+    elif sort.endswith("_asc"):
+        sort_field = sort[:-4]; sort_dir = "asc"
+    else:
+        sort_field = sort or "created"; sort_dir = "desc"
+
+    if sort_field == "client":
+        q = q.join(Client, Asset.client_id == Client.id, isouter=True)
+        col = Client.company_name
+    elif sort_field == "title":
+        col = Asset.title
+    elif sort_field == "kind":
+        col = Asset.kind
+    elif sort_field == "status":
+        col = Asset.status
+    elif sort_field == "scheduled":
+        col = Asset.scheduled_for
+    elif sort_field == "id":
+        col = Asset.id
+    else:
+        col = Asset.created_at
+
+    q = q.order_by(desc(col) if sort_dir == "desc" else asc(col), desc(Asset.id))
+
+    total = q.count()
+    items = q.offset((page - 1) * per_page).limit(per_page).all()
+
+    def qs(**over):
+        args = request.args.to_dict(flat=False)
+        for k, v in over.items():
+            if v is None:
+                args.pop(k, None)
+            elif isinstance(v, list):
+                args[k] = v
+            else:
+                args[k] = [str(v)]
+        return "?" + urlencode(args, doseq=True)
+
+    def page_url(p):
+        return url_for("assets_list") + qs(page=p)
+
+    last_page = max(1, (total + per_page - 1) // per_page)
+    first_url = page_url(1) if page > 1 else None
+    prev_url = page_url(page - 1) if page > 1 else None
+    next_url = page_url(page + 1) if page < last_page else None
+    last_url = page_url(last_page) if page < last_page else None
+
+    start = max(1, page - 2)
+    end = min(last_page, page + 2)
+    page_links = [{"num": i, "url": page_url(i), "active": (i == page)} for i in range(start, end + 1)]
+
+    review_base = request.host_url.rstrip("/") + "/review/"
+    start_idx = 0 if total == 0 else (page - 1) * per_page + 1
+    end_idx = (page - 1) * per_page + len(items)
+
+    def sort_url(field: str):
+        cur = (request.args.get("sort") or "created_desc")
+        cur_field = cur.replace("_desc", "").replace("_asc", "")
+        next_sort = f"{field}_asc"
+        if cur_field == field and cur.endswith("_asc"):
+            next_sort = f"{field}_desc"
+        return url_for("assets_list") + qs(sort=next_sort, page=1)
+
+    def caret(field: str):
+        cur = (request.args.get("sort") or "created_desc")
+        if cur.startswith(field + "_"):
+            return "▲" if cur.endswith("_asc") else "▼"
+        return ""
+
+    clients = Client.query.order_by(Client.company_name.asc()).all()
+
+    return render_template(
+        "assets_list.html",
+        assets=items,
+        clients=clients,
+        qtext=qtext,
+        selected_statuses=selected_statuses,
+        selected_client_id=selected_client_id,
+        total=total,
+        start_idx=start_idx,
+        end_idx=end_idx,
+        first_url=first_url,
+        prev_url=prev_url,
+        next_url=next_url,
+        last_url=last_url,
+        page_links=page_links,
+        review_base=review_base,
+        sort_url=sort_url,
+        caret=caret,
+    )
+
+
+@app.get("/assets/<int:asset_id>")
+@admin_required
+def asset_detail(asset_id: int):
+    a = Asset.query.get_or_404(asset_id)
+    if not a.public_token:
+        ensure_public_token(a)
+        db.session.commit()
+
+    review_url = f"{request.host_url.rstrip('/')}/review/{a.public_token}"
+    preview_url = f"/{a.thumbnail_path or a.storage_path}" if (a.thumbnail_path or a.storage_path) else None
+
+    default_to = (a.client.contact_email if a.client and a.client.contact_email else "")
+    default_cc = (a.client.account_manager_email if a.client and getattr(a.client, "account_manager_email", None) else "")
+
+    return render_template(
+        "asset_detail.html",
+        a=a,
+        review_url=review_url,
+        preview_url=preview_url,
+        default_to=default_to,
+        default_cc=default_cc,
+    )
+
+
+@app.post("/assets/<int:asset_id>/send-review-email")
+@admin_required
+def assets_send_review_email(asset_id: int):
+    asset = Asset.query.get_or_404(asset_id)
+    client = asset.client
+
+    to_addr = (request.form.get("to") or (client.contact_email if client else "") or os.getenv("FALLBACK_TO") or "").strip()
+    cc_field = (request.form.get("cc") or "").strip()
+    cc_list = _split_emails(cc_field)
+
+    if not to_addr:
+        flash("Recipient (To) is required.", "danger")
+        return redirect(url_for("asset_detail", asset_id=asset.id))
+
+    if not asset.public_token:
+        ensure_public_token(asset)
+        db.session.commit()
+    review_url = url_for("public_review", token=asset.public_token, _external=True)
+    storage_url = f"{request.host_url.rstrip('/')}/{asset.storage_path}" if asset.storage_path else None
+
+    subject = f"[Review] {asset.title} — {client.company_name if client else '4UIT Client'}"
+    brand = "4UIT Solutions"
+
+    text_body = f"""Hi,
+There's a new asset ready for your review.
+
+Title: {asset.title}
+Client: {client.company_name if client else '-'}
+
+Review & approve/reject here:
+{review_url}
+
+{('File: ' + storage_url) if storage_url else ''}
+
+Thanks,
+{brand}
+"""
+
+    html_body = f"""<!doctype html><html><body style="margin:0;background:#0f172a;color:#e5e7eb;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial,sans-serif">
+    <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="background:#0f172a;padding:26px 0">
+      <tr><td>
+        <table role="presentation" cellpadding="0" cellspacing="0" width="640" align="center" style="margin:0 auto;background:#111827;border:1px solid #1f2937;border-radius:14px">
+          <tr>
+            <td style="padding:18px 20px;border-bottom:1px solid #1f2937">
+              <table width="100%" role="presentation"><tr>
+                <td style="font-weight:700;font-size:18px;color:#fff">4UIT • Asset Review</td>
+                <td align="right" style="color:#9ca3af;font-size:12px">{brand}</td>
+              </tr></table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:22px 20px">
+              <div style="font-size:16px;color:#e5e7eb;margin-bottom:8px"><strong>{escape(asset.title)}</strong></div>
+              <div style="font-size:13px;color:#9ca3af;margin-bottom:16px">
+                {escape(client.company_name) if client else '-'} • Status: <span style="border:1px solid #374151;border-radius:999px;padding:2px 8px">{escape(asset.status)}</span>
+              </div>
+              {("<div style='margin-bottom:16px'><img src='" + storage_url + "' style='max-width:100%;border-radius:12px;border:1px solid #1f2937'/></div>" if (storage_url and (asset.kind in ('image','copy'))) else "")}
+              <div style="margin:18px 0">
+                <a href="{review_url}" style="background:#0ea5e9;color:#001018;text-decoration:none;padding:10px 16px;border-radius:10px;display:inline-block;font-weight:700">Review & Approve/Reject</a>
+              </div>
+              {("<div style='font-size:12px;color:#9ca3af;margin-top:8px'>File: <a style='color:#93c5fd' href='" + storage_url + "'>" + storage_url + "</a></div>" if storage_url else "")}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:14px 20px;border-top:1px solid #1f2937;color:#9ca3af;font-size:12px">
+              Sent by {brand}. If the button doesn't work, use this link:<br/>
+              <a href="{review_url}" style="color:#93c5fd">{review_url}</a>
+            </td>
+          </tr>
+        </table>
+      </td></tr>
+    </table>
+  </body></html>"""
+
+    attachments = []
+    attach_flag = (request.form.get("attach") == "1")
+    if attach_flag and asset.storage_path:
+        abs_path = os.path.join(BASE_DIR, asset.storage_path.replace("/", os.sep))
+        if os.path.exists(abs_path):
+            attachments.append((abs_path, os.path.basename(abs_path)))
+
+    try:
+        send_email(
+            subject=subject,
+            text_body=text_body,
+            html_body=html_body,
+            to_addrs=[to_addr],
+            cc_addrs=cc_list,
+            attachments=attachments
+        )
+        app.logger.info("Review email sent to %s (cc: %s)", to_addr, ", ".join(cc_list) or "-")
+        flash(f"Email sent to {to_addr}" + (f" (cc: {', '.join(cc_list)})" if cc_list else ""), "success")
+    except Exception as e:
+        app.logger.exception("Error sending email: %s", e)
+        flash(f"Failed to send email: {e}", "danger")
+
+    return redirect(url_for("asset_detail", asset_id=asset.id))
+
+
+@app.route("/assets/upload", methods=["GET", "POST"])
+@admin_required
+def asset_upload():
+    clients = Client.query.order_by(Client.company_name.asc()).all()
+    if request.method == "POST":
+        client_id = request.form.get("client_id", type=int)
+        title = (request.form.get("title") or "").strip()
+        description = request.form.get("description")
+        kind = (request.form.get("kind") or "image").strip().lower()
+        external_url = (request.form.get("external_url") or "").strip()
+
+        f = request.files.get("file")
+        storage_rel = None
+        thumb_rel = None
+        file_mime = None
+        file_size = None
+
+        if f and f.filename:
+            ext = (f.filename.rsplit(".", 1)[-1] or "").lower()
+            if ext not in ALLOWED_EXTS:
+                flash("File type not allowed.", "danger")
+                return redirect(url_for("asset_upload"))
+
+            newname = f"{uuid.uuid4().hex}.{ext}"
+            storage_rel = os.path.join("uploads", "assets", newname)
+            storage_abs = os.path.join(BASE_DIR, storage_rel)
+            f.save(storage_abs)
+            file_mime = f.mimetype
+            try:
+                file_size = pathlib.Path(storage_abs).stat().st_size
+            except Exception:
+                file_size = None
+
+            if _is_image(file_mime, ext):
+                thumb_rel = os.path.join("uploads", "assets", "thumbs", f"{uuid.uuid4().hex}.jpg")
+                thumb_abs = os.path.join(BASE_DIR, thumb_rel)
+                _gen_thumb(storage_abs, thumb_abs)
+
+        if not client_id or not title:
+            flash("Client and title are required.", "danger")
+            return redirect(url_for("asset_upload"))
+
+        asset = Asset(
+            client_id=client_id,
+            title=title,
+            description=description,
+            kind=kind,
+            storage_path=storage_rel,
+            thumbnail_path=thumb_rel,
+            external_url=external_url,
+            file_mime=file_mime,
+            file_size=file_size,
+            uploaded_by_user_id=current_user.id if current_user.is_authenticated else None,
+            status="pending",
+            created_at=utcnow(),
+            updated_at=utcnow(),
+        )
+        # ensure a public token exists for one-click client review
+        ensure_public_token(asset)
+        db.session.add(asset)
+        db.session.commit()
+
+        # >>> SEND EMAIL TO CLIENT: "asset awaiting review"
+        try:
+            sent = notify_client_asset_needs_review(asset)
+            if sent is not False:
+                app.logger.info("Client review email queued/sent for asset #%s", asset.id)
+            else:
+                app.logger.warning("notify_client_asset_needs_review returned False (no recipient?) for asset #%s", asset.id)
+        except Exception as e:
+            app.logger.exception("Failed to send client review email for asset #%s: %s", asset.id, e)
+            # não bloqueia o fluxo do admin, apenas informa
+            flash("Asset uploaded, but failed to send client notification email. Check SMTP/env and logs.", "warning")
+
+        flash("Asset uploaded.", "success")
+        return redirect(url_for("assets_list"))
+
+    return render_template("asset_upload.html", clients=clients)
+
+
+@app.post("/assets/<int:asset_id>/approve")
+@admin_required
+def asset_approve(asset_id: int):
+    asset = Asset.query.get_or_404(asset_id)
+    asset.status = "approved"
+    asset.approved_by_user_id = current_user.id
+    asset.approved_at = utcnow()
+    asset.updated_at = utcnow()
+    db.session.commit()
+    flash("Asset approved.", "success")
+    return redirect(url_for("assets_list", **request.args))
+
+
+@app.post("/assets/<int:asset_id>/reject")
+@admin_required
+def asset_reject(asset_id: int):
+    asset = Asset.query.get_or_404(asset_id)
+    reason = (request.form.get("reason") or "").strip()
+    asset.status = "rejected"
+    asset.rejection_reason = reason or None
+    asset.approved_by_user_id = None
+    asset.approved_at = None
+    asset.updated_at = utcnow()
+    db.session.commit()
+    flash("Asset rejected.", "warning")
+    return redirect(url_for("assets_list", **request.args))
+
+
+@app.post("/assets/<int:asset_id>/mark-posted")
+@admin_required
+def assets_mark_posted(asset_id: int):
+    asset = Asset.query.get_or_404(asset_id)
+    asset.status = "posted"
+    asset.posted_at = utcnow()
+    asset.updated_at = utcnow()
+    db.session.commit()
+    flash("Asset marked as 'posted'.", "success")
+    return redirect(url_for("assets_list", **request.args))
+
+
+# -------------------------------------------------
+# Clients — CRUD (admin)
+# -------------------------------------------------
+@app.get("/clients")
+@admin_required
+def clients_list():
+    qtext = (request.args.get("q") or "").strip()
+    sort = (request.args.get("sort") or "name_asc").strip()
+
+    q = Client.query
+
+    if qtext:
+        like = f"%{qtext}%"
+        q = q.filter(
+            or_(
+                Client.company_name.ilike(like),
+                Client.contact_email.ilike(like),
+                Client.account_manager_email.ilike(like),
+                Client.ein.ilike(like),
+            )
+        )
+
+    if sort == "name_desc":
+        q = q.order_by(desc(Client.company_name), desc(Client.id))
+    else:
+        sort = "name_asc"
+        q = q.order_by(asc(Client.company_name), desc(Client.id))
+
+    clients = q.all()
+
+    def qs(**over):
+        args = request.args.to_dict(flat=False)
+        for k, v in over.items():
+            if v is None:
+                args.pop(k, None)
+            else:
+                args[k] = [str(v)]
+        return "?" + urlencode(args, doseq=True)
+
+    def sort_url():
+        next_sort = "name_desc" if sort == "name_asc" else "name_asc"
+        return url_for("clients_list") + qs(sort=next_sort)
+
+    def caret():
+        return "▲" if sort == "name_asc" else "▼"
+
+    return render_template(
+        "clients_list.html",
+        clients=clients,
+        qtext=qtext,
+        sort=sort,
+        sort_url=sort_url,
+        caret=caret,
+    )
+
+def _build_onboarding_links(c: Client, external: bool = True) -> tuple[str, str]:
+    """
+    Retorna (contract_url, access_url)
+    - contract_url usa client_id (garante carregar override/template desse cliente)
+    - access_url vem pré-preenchido por conveniência
+    """
+    contract_url = url_for("contract_page", _external=external, client_id=c.id)
+    access_url = url_for("access_request_page", _external=external) + \
+                 f"?company={quote(c.company_name or '')}&email={quote(c.contact_email or '')}"
+    return contract_url, access_url
+
+
+@app.post("/clients/new")
+@admin_required
+def clients_new():
+    c = Client(
+        company_name=(request.form.get("company_name") or "").strip(),
+        contact_email=(request.form.get("contact_email") or "").strip() or None,
+        account_manager_email=(request.form.get("account_manager_email") or "").strip() or None,
+        ein=(request.form.get("ein") or "").strip() or None,
+        address=(request.form.get("address") or "").strip() or None,
+        legal_representative=(request.form.get("legal_representative") or "").strip() or None,
+    )
+    if not c.company_name:
+        flash("Company name is required.", "danger")
+        return redirect(url_for("clients_list"))
+
+    db.session.add(c)
+    db.session.commit()
+    flash("Client added. Choose the contract template and click Save to send the onboarding e-mail.", "info")
+
+    # keep the current flow: go to the pref page; the POST there will send the email
+    return redirect(url_for("client_contract_pref", client_id=c.id))
+
+
+
+@app.route("/clients/<int:client_id>/edit", methods=["GET", "POST"])
+@admin_required
+def clients_edit(client_id: int):
+    c = Client.query.get_or_404(client_id)
+    if request.method == "POST":
+        c.company_name = (request.form.get("company_name") or "").strip()
+        c.contact_email = (request.form.get("contact_email") or "").strip() or None
+        c.account_manager_email = (request.form.get("account_manager_email") or "").strip() or None
+        c.ein = (request.form.get("ein") or "").strip() or None
+        c.address = (request.form.get("address") or "").strip() or None
+        c.legal_representative = (request.form.get("legal_representative") or "").strip() or None
+        if not c.company_name:
+            flash("Company name is required.", "danger")
+            return redirect(url_for("clients_edit", client_id=client_id))
+        db.session.commit()
+        flash("Client saved.", "success")
+        return redirect(url_for("clients_list"))
+
+    return render_template("clients_edit.html", c=c)
+
+
+@app.post("/clients/<int:client_id>/delete")
+@admin_required
+def clients_delete(client_id: int):
+    c = Client.query.get_or_404(client_id)
+    force = (request.args.get("force") == "1") or (request.form.get("force") == "1")
+    try:
+        # 1) SEMPRE apaga a preferência 1-para-1 primeiro (evita NULL no FK)
+        ClientContractPref.query.filter_by(client_id=c.id).delete(synchronize_session=False)
+
+        # 2) Se não for "forçado", bloqueia se existir vínculo em outras tabelas
+        if not force:
+            deps = {
+                "contracts": Contract.query.filter_by(client_id=c.id).count(),
+                "assets": Asset.query.filter_by(client_id=c.id).count(),
+                "access": AccessRequest.query.filter_by(client_id=c.id).count(),
+            }
+            if sum(deps.values()) > 0:
+                db.session.rollback()
+                flash(
+                    f"Não foi possível excluir '{c.company_name}'. "
+                    f"Existem {deps['contracts']} contrato(s), {deps['assets']} asset(s) "
+                    f"e {deps['access']} access request(s) vinculados. "
+                    f"Remova/mova primeiro ou use a opção de exclusão forçada.",
+                    "danger"
+                )
+                return redirect(url_for("clients_list"))
+
+        # 3) Modo forçado: apaga todos os filhos
+        if force:
+            Contract.query.filter_by(client_id=c.id).delete(synchronize_session=False)
+            Asset.query.filter_by(client_id=c.id).delete(synchronize_session=False)
+            AccessRequest.query.filter_by(client_id=c.id).delete(synchronize_session=False)
+
+        # 4) Por fim, apaga o cliente
+        db.session.delete(c)
+        db.session.commit()
+        flash("Cliente excluído.", "warning")
+    except Exception as e:
+        db.session.rollback()
+        flash(f"Erro ao excluir: {e}", "danger")
+
+    return redirect(url_for("clients_list"))
+
+@app.get("/uploads/access_signatures/<path:filename>")
+def get_access_signature(filename):
+    return send_from_directory(ACCESS_SIGS_DIR, filename)
+
+
+@app.get("/admin/clients/<int:client_id>/links")
+@admin_required
+def clients_links(client_id: int):
+    c = Client.query.get_or_404(client_id)
+    token = make_onboarding_token(c.id)
+
+    contract_url, access_url = _build_onboarding_links(c, external=True)
+    onboarding_url = url_for("onboarding_page", token=token, _external=True)
+
+    return render_template("onboarding_links.html",
+                           c=c,
+                           contract_url=contract_url,
+                           access_url=access_url,
+                           onboarding_url=onboarding_url)
+
+
+@app.get("/onboarding/<token>")
+def onboarding_page(token: str):
+    try:
+        data = decode_onboarding_token(token)
+        c = Client.query.get_or_404(int(data["cid"]))
+    except (BadSignature, SignatureExpired, KeyError, ValueError):
+        abort(404)
+
+    contract_url, access_url = _build_onboarding_links(c, external=False)
+
+    return render_template("onboarding.html",
+                           c=c,
+                           contract_url=contract_url,
+                           access_url=access_url)
+
+
+# -------------------------------------------------
+# Admin (protected)
+# -------------------------------------------------
+from sqlalchemy.orm import joinedload
+
+@app.get("/admin")
+@login_required
+def admin_home():
+    contracts = Contract.query.options(joinedload(Contract.client)).order_by(Contract.id.desc()).all()
+    access_list = AccessRequest.query.options(joinedload(AccessRequest.client)).order_by(AccessRequest.id.desc()).all()
+    assets = Asset.query.options(joinedload(Asset.client)).order_by(Asset.id.desc()).all()
+    return render_template("admin.html", contracts=contracts, access_list=access_list, assets=assets)
+
+
+# ---------------------------------------------
+# Admin — Contracts (view / pdf)
+# ---------------------------------------------
+@app.get("/admin/contracts/<int:contract_id>")
+@admin_required
+def admin_contract_view(contract_id: int):
+    c = Contract.query.get_or_404(contract_id)
+    pdf_abs = _generate_contract_pdf(c)  # tenta gerar (se ReportLab disponível)
+    pdf_exists = bool(pdf_abs and os.path.exists(pdf_abs))
+    return render_template("admin_contract_view.html", contract=c, pdf_exists=pdf_exists)
+
+@app.get("/admin/contracts/<int:contract_id>/pdf")
+@admin_required
+def admin_contract_pdf(contract_id: int):
+    cn = Contract.query.get_or_404(contract_id)
+
+    # Usa exatamente o mesmo gerador do portal do cliente
+    pdf_abs = _generate_contract_pdf(cn)
+
+    if not (pdf_abs and os.path.exists(pdf_abs)):
+        flash("PDF engine not available or failed to generate. Check ReportLab and logs.", "danger")
+        return redirect(url_for("admin_contract_view", contract_id=contract_id))
+
+    return send_file(
+        pdf_abs,
+        as_attachment=True,
+        download_name=f"4UIT-contract-{cn.id}.pdf"
+    )
+# -------------------------------------------------
+# Static for uploads
+# -------------------------------------------------
+@app.get("/uploads/signatures/<path:filename>")
+def get_signature(filename):
+    return send_from_directory(UPLOAD_SIGS_DIR, filename)
+
+
+@app.get("/uploads/assets/<path:filename>")
+def get_asset_file(filename):
+    folder = UPLOAD_ASSETS_DIR
+    if filename.startswith("thumbs/"):
+        folder = UPLOAD_ASSETS_THUMBS_DIR
+        filename = filename.split("thumbs/", 1)[1]
+    return send_from_directory(folder, filename)
+
+
+# ============================
+# Public review (client)
+# ============================
+@app.get("/review/<token>")
+def public_review(token):
+    asset = Asset.query.filter_by(public_token=token).first_or_404()
+    storage_url = f"/{asset.storage_path}" if asset.storage_path else None
+    thumb_url = f"/{asset.thumbnail_path}" if asset.thumbnail_path else None
+    external_url = asset.external_url
+
+    return render_template(
+        "public_review.html",
+        asset=asset,
+        token=token,
+        storage_url=storage_url,
+        thumb_url=thumb_url,
+        external_url=external_url,
+    )
+
+
+@app.post("/review/<token>/decision")
+def public_review_decision(token):
+    asset = Asset.query.filter_by(public_token=token).first_or_404()
+
+    decision = (request.form.get("decision") or "").strip().lower()
+    comment = (request.form.get("comment") or "").strip()
+    scheduled_for_raw = (request.form.get("scheduled_for") or "").strip()
+
+    if decision not in ("approve", "reject"):
+        return render_template_string("<p class='error'>Invalid decision.</p>"), 400
+
+    # Parse schedule (ISO 8601)
+    scheduled_dt = None
+    if scheduled_for_raw:
+        try:
+            scheduled_dt = datetime.fromisoformat(scheduled_for_raw)
+            if scheduled_dt.tzinfo is None:
+                # Assume UTC if user forgot timezone
+                scheduled_dt = scheduled_dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            scheduled_dt = None
+
+    # Reject requires a comment
+    if decision == "reject" and not comment:
+        storage_url = f"/{asset.storage_path}" if asset.storage_path else None
+        thumb_url = f"/{asset.thumbnail_path}" if asset.thumbnail_path else None
+        return render_template(
+            "public_review.html",
+            asset=asset,
+            token=token,
+            storage_url=storage_url,
+            external_url=asset.external_url,
+            error="Please add a comment to explain the rejection."
+        ), 400
+
+    # Apply decision
+    if decision == "approve":
+        asset.status = "approved"
+        asset.approved_at = utcnow()
+        asset.rejection_reason = None
+    else:
+        asset.status = "rejected"
+        asset.rejection_reason = comment or "Rejected by client"
+        asset.approved_at = None
+
+    asset.client_comment = comment or None
+    if scheduled_dt:
+        asset.scheduled_for = scheduled_dt
+
+    # Always touch updated_at and commit (bug fix: commit was inside the schedule block)
+    asset.updated_at = utcnow()
+    try:
+        db.session.flush()   # ensure UPDATE hits before commit
+        db.session.commit()
+        db.session.refresh(asset)
+        app.logger.info("Asset #%s marked as %s by public review", asset.id, asset.status)
+    except Exception as e:
+        db.session.rollback()
+        app.logger.exception("Failed to persist public decision for asset #%s: %s", asset.id, e)
+        return render_template_string("<p class='error'>Could not save your decision. Please try again.</p>"), 500
+
+    # --- Notify team about client's decision (approve/reject), including comment ---
+    try:
+        action_label = "approved" if decision == "approve" else "rejected"
+
+        # lightweight adapter so notify_* can read "comments"
+        class _Review: ...
+        review = _Review()
+        review.comments = comment or None
+
+        notify_team_asset_review_feedback(asset, review, action_label)
+    except Exception as e:
+        app.logger.warning("public_review_decision: notify_team_asset_review_feedback failed: %s", e)
+
+    return render_template("review_confirmation.html", asset=asset)
+
+
+
+# ============================
+# Portal do Cliente
+# ============================
+def _client_assets_query_for_user(user: User):
+    return (Asset.query
+            .join(Client, Asset.client_id == Client.id, isouter=True)
+            .filter(Client.contact_email == user.email))
+
+@app.get("/portal")
+@login_required
+def portal_home():
+    if getattr(current_user, "role", "") == "admin":
+        return redirect(url_for("admin_home"))
+    return redirect(url_for("portal_contracts"))
+
+
+@app.get("/portal/assets")
+@login_required
+def portal_assets():
+    if getattr(current_user, "role", "") == "admin":
+        return redirect(url_for("assets_list"))
+    assets = (_client_assets_query_for_user(current_user)
+              .order_by(desc(Asset.created_at), desc(Asset.id)).all())
+    review_base = request.host_url.rstrip("/") + "/review/"
+    return render_template("portal_assets.html", portal_active="assets", assets=assets, review_base=review_base)
+
+
+@app.get("/portal/assets/<int:asset_id>")
+@login_required
+def portal_asset_detail(asset_id: int):
+    if getattr(current_user, "role", "") == "admin":
+        return redirect(url_for("asset_detail", asset_id=asset_id))
+    a = (_client_assets_query_for_user(current_user)
+         .filter(Asset.id == asset_id).first_or_404())
+    if not a.public_token:
+        ensure_public_token(a)
+        db.session.commit()
+    review_url = f"{request.host_url.rstrip('/')}/review/{a.public_token}"
+    preview_url = f"/{a.thumbnail_path or a.storage_path}" if (a.thumbnail_path or a.storage_path) else None
+    return render_template("portal_asset_detail.html", a=a, review_url=review_url, preview_url=preview_url)
+
+
+@app.get("/portal/reports")
+@login_required
+def portal_reports():
+    if getattr(current_user, "role", "") == "admin":
+        return redirect(url_for("admin_home"))
+    return render_template("portal_reports.html")
+
+
+# -------------------------------------------------
+# Contract Templates (Admin)
+# -------------------------------------------------
+@app.route("/admin/contract-templates", methods=["GET", "POST"])
+@admin_required
+def contract_templates_list():
+    if request.method == "POST":
+        name = (request.form.get("name") or "").strip()
+        body = (request.form.get("body") or "").strip()
+        is_default = bool(request.form.get("is_default"))
+        if not name or not body:
+            flash("Name and Body are required.", "danger")
+        else:
+            if is_default:
+                ContractTemplate.query.update({ContractTemplate.is_default: False})
+            t = ContractTemplate(name=name, body=body, is_default=is_default)
+            db.session.add(t)
+            db.session.commit()
+            flash("Template created.", "success")
+            return redirect(url_for("contract_templates_list"))
+
+    templates = ContractTemplate.query.order_by(ContractTemplate.updated_at.desc()).all()
+    return render_template("contract_templates_list.html", templates=templates)
+
+
+@app.route("/admin/contract-templates/<int:tpl_id>/edit", methods=["GET", "POST"])
+@admin_required
+def contract_templates_edit(tpl_id: int):
+    tpl = ContractTemplate.query.get_or_404(tpl_id)
+    if request.method == "POST":
+        tpl.name = (request.form.get("name") or "").strip()
+        tpl.body = (request.form.get("body") or "").strip()
+        is_default = bool(request.form.get("is_default"))
+        if is_default:
+            ContractTemplate.query.update({ContractTemplate.is_default: False})
+            tpl.is_default = True
+        else:
+            tpl.is_default = False
+        if not tpl.name or not tpl.body:
+            flash("Name and Body are required.", "danger")
+        else:
+            db.session.commit()
+            flash("Template saved.", "success")
+            return redirect(url_for("contract_templates_list"))
+
+    return render_template("contract_template_edit.html", tpl=tpl)
+
+
+@app.post("/admin/contract-templates/<int:tpl_id>/delete")
+@admin_required
+def contract_templates_delete(tpl_id: int):
+    tpl = ContractTemplate.query.get_or_404(tpl_id)
+    db.session.delete(tpl)
+    db.session.commit()
+    flash("Template deleted.", "warning")
+    return redirect(url_for("contract_templates_list"))
+
+
+@app.route("/admin/clients/<int:client_id>/contract", methods=["GET", "POST"])
+@admin_required
+def client_contract_pref(client_id: int):
+    c = Client.query.get_or_404(client_id)
+    pref = ClientContractPref.query.filter_by(client_id=c.id).first()
+    templates = ContractTemplate.query.order_by(ContractTemplate.name.asc()).all()
+
+    if request.method == "POST":
+        tpl_id = request.form.get("template_id", type=int)
+        override_text = (request.form.get("override_text") or "").strip() or None
+
+        if not pref:
+            pref = ClientContractPref(client_id=c.id)
+            db.session.add(pref)
+
+        pref.template_id = tpl_id
+        pref.override_text = override_text
+        db.session.commit()
+
+        # ---- Send onboarding email right after saving ----
+        to = (c.contact_email or "").strip()
+        if to:
+            brand = "4UIT Solutions"
+            contract_url, access_url = _build_onboarding_links(c, external=True)
+            subject = f"{c.company_name or 'Client'} — Please review and e-sign your 4UIT agreement"
+
+            text_body = f"""Hello,
+
+Please review and e-sign your agreement with {brand}:
+
+Contract: {contract_url}
+
+(Optional) You can also pre-share access info for Ads/Analytics/Domain/Hosting here:
+{access_url}
+
+Thank you,
+{brand}
+"""
+
+            html_body = f"""
+            <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif">
+              <p>Hello{(' ' + (c.legal_representative or '')).strip()}</p>
+              <p>Please review and e-sign your agreement with <strong>{brand}</strong>:</p>
+              <p>
+                <a href="{contract_url}" style="background:#0d6efd;color:#fff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:600">
+                  Open &amp; Sign Contract
+                </a>
+              </p>
+              <p style="margin-top:12px">
+                (Optional) You can also pre-share access info for Ads/Analytics/Domain/Hosting:<br/>
+                <a href="{access_url}">{access_url}</a>
+              </p>
+              <p>Thank you,<br/>{brand}</p>
+            </div>
+            """
+
+            # CC admins/notify list if configured
+            cc_list = _split_emails(os.getenv("ADMIN_EMAIL")) or _split_emails(os.getenv("NOTIFY_TO")) or None
+            try:
+                send_email(subject, text_body, html_body, to_addrs=[to], cc_addrs=cc_list, attachments=None)
+                flash(f"Onboarding e-mail sent to {to}.", "success")
+            except Exception as e:
+                app.logger.exception("Failed to send onboarding email: %s", e)
+                flash(f"Preference saved, but failed to send onboarding e-mail: {e}", "danger")
+        else:
+            flash("Preference saved. No e-mail sent (client has no contact_email).", "warning")
+
+        # After sending, go back to clients list (clear the modal feeling)
+        return redirect(url_for("clients_list"))
+
+    share_url = url_for("contract_page", client_id=c.id, _external=True)
+    return render_template(
+        "client_contract_pref.html",
+        client=c,
+        pref=pref,
+        templates=templates,
+        share_url=share_url,
+    )
+
+
+
+# --- Helpers de vínculo cliente-usuário ---
+def _client_for_user(user: User):
+    if not user or not user.is_authenticated:
+        return None
+    return Client.query.filter(Client.contact_email == user.email).first()
+
+
+# ================
+# Portal — CONTRATOS
+# ================
+@app.get("/portal/contracts")
+@login_required
+def portal_contracts():
+    if getattr(current_user, "role", "") == "admin":
+        return redirect(url_for("admin_home"))
+
+    client = Client.query.filter_by(contact_email=current_user.email).first()
+    contracts = []
+    access_last = None
+    access_count = 0
+    access_rows = []  # histórico
+    access_prefill = url_for("access_request_page")
+
+    if client:
+        contracts = (Contract.query
+                     .filter_by(client_id=client.id)
+                     .order_by(desc(Contract.id))
+                     .all())
+
+        q = (AccessRequest.query
+             .filter_by(client_id=client.id)
+             .order_by(desc(AccessRequest.submitted_at), desc(AccessRequest.id)))
+        access_rows = q.all()
+        access_last = access_rows[0] if access_rows else None
+        access_count = q.count()
+
+        access_prefill = (url_for("access_request_page") +
+                          f"?company={quote(client.company_name or '')}"
+                          f"&email={quote(client.contact_email or '')}")
+
+    return render_template(
+        "portal_contracts.html",
+        client=client,
+        contracts=contracts,
+        access_last=access_last,
+        access_count=access_count,
+        access_rows=access_rows,
+        access_prefill=access_prefill
+    )
+
+
+@app.get("/portal/contracts/<int:contract_id>/pdf")
+@login_required
+def portal_contract_pdf(contract_id: int):
+    cn = Contract.query.get_or_404(contract_id)
+    if getattr(current_user, "role", "") != "admin":
+        if not cn.client or cn.client.contact_email != current_user.email:
+            abort(403)
+
+    pdf_abs = _generate_contract_pdf(cn)
+    if not (pdf_abs and os.path.exists(pdf_abs)):
+        flash("Could not generate PDF.", "danger")
+        return redirect(url_for("portal_contracts"))
+
+    return send_file(pdf_abs, as_attachment=True, download_name=f"4UIT-contract-{cn.id}.pdf")
+
+
+# ======================
+# Portal — ACCESS REQUESTS
+# ======================
+@app.get("/portal/access-requests")
+@login_required
+def portal_access_requests():
+    if getattr(current_user, "role", "") == "admin":
+        return redirect(url_for("assets_list"))
+
+    c = _client_for_user(current_user)
+    access = []
+    access_form_url = url_for("access_request_page")
+    if c:
+        access = (AccessRequest.query
+                  .filter(AccessRequest.client_id == c.id)
+                  .order_by(AccessRequest.id.desc())
+                  .all())
+        access_form_url = (url_for("access_request_page") +
+                           f"?company={quote(c.company_name or '')}&email={quote(c.contact_email or '')}")
+
+    return render_template("portal_access_requests.html",
+                           access_list=access,
+                           access_form_url=access_form_url)
+
+
+@app.get("/portal/access/<int:ar_id>/pdf")
+@login_required
+def portal_access_pdf(ar_id: int):
+    ar = AccessRequest.query.get_or_404(ar_id)
+    client = Client.query.filter_by(contact_email=current_user.email).first()
+    if not client or ar.client_id != client.id:
+        abort(403)
+    path = _access_pdf_path(ar.id)
+    if not os.path.exists(path):
+        _generate_access_pdf(ar)
+    return send_file(path, as_attachment=True, download_name=f"access-{ar.id}.pdf")
+
+
+# ======================
+# Portal — Asset Review (única definição)
+# ======================
+def _resolve_user_client_id():
+    """
+    Tenta descobrir o client_id do usuário logado pelas vias:
+    1) user.client_id (campo direto)
+    2) user.client (relationship)
+    3) e-mail do usuário batendo com contact_email OU account_manager_email do Client
+    """
+    cid = getattr(current_user, "client_id", None)
+    if cid:
+        return cid
+
+    # relationship opcional: user.client
+    if hasattr(current_user, "client") and getattr(current_user, "client", None):
+        try:
+            return current_user.client.id
+        except Exception:
+            pass
+
+    # fallback por e-mail
+    user_email = getattr(current_user, "email", None)
+    if user_email:
+        c = Client.query.filter(
+            or_(
+                Client.contact_email == user_email,
+                Client.account_manager_email == user_email,
+            )
+        ).first()
+        if c:
+            return c.id
+
+    return None
+
+def _client_asset_for_user(asset_id: int):
+    """
+    Retorna (client, asset) se o usuário tiver acesso.
+    - Admin pode ver tudo
+    - Usuário do portal só vê assets do próprio client.
+    """
+    asset = Asset.query.get_or_404(asset_id)
+
+    # Admin vê tudo
+    if getattr(current_user, "role", None) == "admin":
+        client = asset.client if hasattr(asset, "client") else Client.query.get(asset.client_id)
+        return client, asset
+
+    # Portal user precisa bater client_id
+    user_client_id = _resolve_user_client_id()
+    if not user_client_id:
+        abort(403)
+
+    if asset.client_id != user_client_id:
+        abort(403)
+
+    client = asset.client if hasattr(asset, "client") else Client.query.get(user_client_id)
+    return client, asset
+
+@app.get("/portal/assets/<int:asset_id>/review")
+@login_required
+def portal_asset_review(asset_id: int):
+    if getattr(current_user, "role", "") == "admin":
+        return redirect(url_for("asset_detail", asset_id=asset_id))
+
+    client, asset = _client_asset_for_user(asset_id)
+    if not asset:
+        flash("Asset not found for your account.", "error")
+        return redirect(url_for("portal_assets"))
+
+    preview_url = None
+    if getattr(asset, "thumbnail_path", None):
+        preview_url = f"/{asset.thumbnail_path}"
+    elif getattr(asset, "storage_path", None):
+        preview_url = f"/{asset.storage_path}"
+
+    reviews = (AssetReview.query
+               .filter_by(asset_id=asset.id, client_id=client.id)
+               .order_by(desc(AssetReview.created_at), desc(AssetReview.id))
+               .all())
+
+    return render_template("portal_asset_review.html",
+                           portal_active="assets",
+                           a=asset,
+                           preview_url=preview_url,
+                           reviews=reviews)
+
+@app.post("/portal/assets/<int:asset_id>/review")
+@login_required
+def portal_asset_review_submit(asset_id: int):
+    if getattr(current_user, "role", "") == "admin":
+        return redirect(url_for("asset_detail", asset_id=asset_id))
+
+    client, asset = _client_asset_for_user(asset_id)
+    if not asset:
+        flash("Asset not found for your account.", "error")
+        return redirect(url_for("portal_assets"))
+
+    action = request.form.get("action")  # approve | changes | reject
+    note = (request.form.get("note") or "").strip()
+
+    status_map = {
+        "approve": "approved",
+        "changes": "changes_requested",
+        "reject": "rejected",
+    }
+    if action not in status_map:
+        flash("Invalid action.", "error")
+        return redirect(url_for("portal_asset_review", asset_id=asset.id))
+
+    if action in ("changes", "reject") and not note:
+        flash("Please add a note explaining your request.", "error")
+        return redirect(url_for("portal_asset_review", asset_id=asset.id))
+
+    rev = AssetReview(
+        asset_id=asset.id,
+        client_id=client.id,
+        status=status_map[action],
+        note=note or None,
+        created_by_email=getattr(current_user, "email", None),
+    )
+    db.session.add(rev)
+
+    asset.status = rev.status
+    db.session.commit()
+
+    # --- notify team about client's portal feedback (approve/changes/reject) ---
+    try:
+        # map back to a human label for the email subject/body
+        action_map = {
+            "approved": "approved",
+            "changes_requested": "changes requested",
+            "rejected": "rejected",
+        }
+        action_label = action_map.get(rev.status, rev.status)
+
+        # lightweight adapter so notify_* can read "comments"
+        class _Review: ...
+        review = _Review()
+        review.comments = note or None
+
+        notify_team_asset_review_feedback(asset, review, action_label)
+    except Exception as e:
+        app.logger.warning("portal_asset_review_submit: notify_team_asset_review_feedback failed: %s", e)
+
+    flash("Feedback submitted. Thank you!", "success")
+    return redirect(url_for("portal_asset_review", asset_id=asset.id))
+
+
+
+# -------------------------------------------------
+# Main
+# -------------------------------------------------
+if __name__ == "__main__":
+    app.run(debug=True)

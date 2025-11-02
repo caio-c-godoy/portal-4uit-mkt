@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% set title = "Onboarding — 4UIT" %}
+{% set heading = "Welcome" %}
+{% set subheading = c.company_name %}
+
+{% block content %}
+<div class="card">
+  <p>To get started, please complete the steps below.</p>
+  <p><a class="btn" href="{{ contract_url }}">Sign the Contract</a></p>
+  <p><a class="btn btn-ghost" href="{{ access_url }}">Submit Access Request</a></p>
+</div>
+{% endblock %}

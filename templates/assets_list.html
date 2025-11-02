@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% set title = "Assets — 4UIT" %}
+{% set heading = "Assets" %}
+{% set subheading = "Approval workspace" %}
+
+{% block content %}
+<div class="card" style="padding:12px">
+  <form method="get" class="grid" style="grid-template-columns:1.2fr 0.8fr 0.8fr auto; gap:8px; align-items:end">
+    <div>
+      <label class="ff-label">Search</label>
+      <input class="ff-input" type="search" name="q" placeholder="Title or description…" value="{{ qtext }}">
+    </div>
+    <div>
+      <label class="ff-label">Status</label>
+      <select class="ff-input" name="status">
+        <option value="">All</option>
+        {% for s in ["pending","approved","rejected","posted"] %}
+          <option value="{{s}}" {% if selected_statuses and selected_statuses[0]==s %}selected{% endif %}>{{s}}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label class="ff-label">Client</label>
+      <select class="ff-input" name="client_id">
+        <option value="">All</option>
+        {% for c in clients %}
+          <option value="{{c.id}}" {% if selected_client_id==c.id %}selected{% endif %}>{{ c.company_name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div style="display:flex; gap:8px">
+      <button class="btn" type="submit">Filter</button>
+      <a class="btn btn-ghost" href="{{ url_for('assets_list') }}">Reset</a>
+    </div>
+  </form>
+</div>
+
+<div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+  <div class="muted">Showing {{ start_idx }}–{{ end_idx }} of {{ total }}</div>
+  <div>
+    <a class="btn" href="{{ url_for('asset_upload') }}">Upload new asset</a>
+    <a class="btn btn-ghost" href="{{ url_for('clients_list') }}">Clients</a>
+  </div>
+</div>
+
+<div class="card" style="padding:0; margin-top:8px">
+  <div style="overflow:auto">
+    <table>
+      <thead>
+        <tr>
+          <th><a href="{{ sort_url('id') }}"># {{ caret('id') }}</a></th>
+          <th><a href="{{ sort_url('client') }}">Client {{ caret('client') }}</a></th>
+          <th><a href="{{ sort_url('title') }}">Title {{ caret('title') }}</a></th>
+          <th><a href="{{ sort_url('kind') }}">Kind {{ caret('kind') }}</a></th>
+          <th><a href="{{ sort_url('status') }}">Status {{ caret('status') }}</a></th>
+          <th><a href="{{ sort_url('scheduled') }}">Scheduled {{ caret('scheduled') }}</a></th>
+          <th><a href="{{ sort_url('created') }}">Created {{ caret('created') }}</a></th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for x in assets %}
+        <tr>
+          <td>{{ x.id }}</td>
+          <td>{{ x.client.company_name if x.client else '-' }}</td>
+          <td>{{ x.title }}</td>
+          <td>{{ x.kind }}</td>
+          <td>{{ x.status }}</td>
+          <td>{{ x.scheduled_for.isoformat() if x.scheduled_for else '-' }}</td>
+          <td>{{ x.created_at.isoformat() if x.created_at else '-' }}</td>
+          <td style="white-space:nowrap">
+            {% if x.public_token %}
+              <input value="{{ review_base }}{{ x.public_token }}" style="width:240px" readonly />
+              <button class="btn" type="button" onclick="navigator.clipboard.writeText(this.previousElementSibling.value)">Copy</button>
+            {% else %}
+              <span class="muted">no token</span>
+            {% endif %}
+            <a class="btn btn-ghost" href="{{ url_for('asset_detail', asset_id=x.id) }}">Details</a>
+            {% if x.storage_path %}
+              <a class="btn btn-ghost" href="/{{ x.storage_path }}" target="_blank" rel="noopener">Open file</a>
+            {% endif %}
+            {% if x.status != 'posted' %}
+              <form method="post" action="{{ url_for('assets_mark_posted', asset_id=x.id) }}" style="display:inline">
+                <button class="btn" type="submit">Mark as posted</button>
+              </form>
+            {% else %}
+              <span class="pill">posted</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+        {% if not assets %}
+        <tr><td colspan="8" class="muted" style="padding:14px">No assets found.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<nav aria-label="Pagination" class="card" style="display:flex;gap:8px;align-items:center;justify-content:center;margin-top:10px">
+  <span class="muted">Pagination disabled (not needed now)</span>
+</nav>
+{% endblock %}

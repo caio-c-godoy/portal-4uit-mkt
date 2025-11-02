@@ -1,0 +1,45 @@
+{% extends "portal_base.html" %}
+{% set title = "Assets — 4UIT" %}
+{% set heading = "My Assets" %}
+{% set subheading = "Review, comment and approve your creatives" %}
+
+{% block content %}
+<div class="card" style="margin-bottom:12px">
+  <div class="muted">Below are creatives our team shared with you. Click “Review” to approve or request changes.</div>
+</div>
+
+<div class="card" style="padding:0">
+  <div style="overflow:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Title</th>
+          <th>Status</th>
+          <th>Shared at</th>
+          <th style="width:220px">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in assets %}
+          <tr>
+            <td>{{ a.id }}</td>
+            <td>{{ a.title or a.filename or '—' }}</td>
+            <td>{{ a.status or 'pending' }}</td>
+            <td>{{ a.created_at.isoformat() if a.created_at else '—' }}</td>
+            <td style="white-space:nowrap">
+              <a class="btn" href="{{ url_for('portal_asset_review', asset_id=a.id) }}">Review</a>
+              {% if a.storage_path %}
+                <a class="btn btn-ghost" href="/{{ a.storage_path }}" target="_blank">Download</a>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        {% if not assets %}
+          <tr><td colspan="5" class="muted" style="padding:14px">No assets yet.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% set title = "Client Contract — 4UIT" %}
+{% set heading = "Client contract" %}
+{% set subheading = client.company_name %}
+
+{% block content %}
+<div class="card">
+  <form method="post" class="grid" style="grid-template-columns:1fr;gap:8px">
+    <label class="ff-label">Template</label>
+    <select class="ff-input" name="template_id">
+      <option value="">(none)</option>
+      {% for t in templates %}
+      <option value="{{ t.id }}" {% if pref and pref.template_id==t.id %}selected{% endif %}>{{ t.name }}</option>
+      {% endfor %}
+    </select>
+
+    <label class="ff-label">Override (optional)</label>
+    <textarea class="ff-input" name="override_text" rows="16" placeholder="Paste a custom contract here (this overrides the template)">{% if pref and pref.override_text %}{{ pref.override_text }}{% endif %}</textarea>
+
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="btn">Save</button>
+      <span class="muted">Share link: <a class="link" href="{{ share_url }}" target="_blank">{{ share_url }}</a></span>
+    </div>
+  </form>
+</div>
+{% endblock %}

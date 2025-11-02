@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% set title = "Admin — 4UIT" %}
+{% set heading = "Admin (Read-only)" %}
+{% set subheading = "Contracts, Access Requests & Assets" %}
+
+{% block content %}
+<div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:10px">
+  <a class="btn" href="{{ url_for('assets_list') }}">Assets</a>
+  <a class="btn" href="{{ url_for('clients_list') }}" style="background:#6b7280">Clients</a>
+  <a class="btn btn-ghost" href="{{ url_for('contract_templates_list') }}">Templates</a>
+</div>
+
+<h3>Contracts</h3>
+<div class="card" style="padding:0">
+  <div style="overflow:auto">
+    <table class="table align-middle">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Client</th>
+          <th>Signer</th>
+          <th>Email</th>
+          <th>Signed (UTC)</th>
+          <th>IP</th>
+          <th style="width:260px">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in contracts %}
+        <tr>
+          <td>{{ c.id }}</td>
+          <td>{{ c.client.company_name if c.client else '-' }}</td>
+          <td>{{ c.signer_name or '-' }}</td>
+          <td>{{ c.signer_email or '-' }}</td>
+          <td>{{ c.signed_at.isoformat() if c.signed_at else '-' }}</td>
+          <td>{{ c.signer_ip or '-' }}</td>
+          <td style="white-space:nowrap">
+            {% if c.signature_path %}
+              <a class="btn btn-light border" href="/{{ c.signature_path|replace('\\','/') }}" target="_blank" rel="noopener">Signature</a>
+            {% else %}
+              <button class="btn btn-light border" disabled>Signature</button>
+            {% endif %}
+            <a class="btn btn-ghost" href="{{ url_for('admin_contract_view', contract_id=c.id) }}">View</a>
+            <a class="btn" href="{{ url_for('admin_contract_pdf', contract_id=c.id) }}">PDF</a>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="muted" style="padding:12px">No contracts.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<hr/>
+<h3>Access Requests</h3>
+<div class="card" style="padding:0">
+  <div style="overflow:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Client</th>
+          <th>Google Ads</th>
+          <th>Meta Ads</th>
+          <th>Website</th>
+          <th>Submitted (UTC)</th>
+          <th>IP</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in access_list %}
+        <tr>
+          <td>{{ a.id }}</td>
+          <td>{{ a.client.company_name if a.client else '-' }}</td>
+          <td>{{ a.google_ads_id or '-' }}</td>
+          <td>{{ a.meta_ads_account_id or '-' }}</td>
+          <td>{{ a.website_url or '-' }}</td>
+          <td>{{ a.submitted_at.isoformat() if a.submitted_at else '-' }}</td>
+          <td>{{ a.signer_ip or '-' }}</td>
+          <td style="white-space:nowrap">
+            {% if a.signature_path %}
+              <a class="btn btn-ghost" href="/{{ a.signature_path }}" target="_blank" rel="noopener">Signature</a>
+            {% else %}
+              <span class="muted">no signature</span>
+            {% endif %}
+            <a class="btn btn-ghost" href="{{ url_for('admin_access_view', ar_id=a.id) }}">View</a>
+            <a class="btn" href="{{ url_for('admin_access_pdf', ar_id=a.id) }}">PDF</a>
+          </td>
+        </tr>
+        {% endfor %}
+        {% if not access_list %}
+        <tr><td colspan="8" class="muted" style="padding:12px">No access requests.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+
+<hr/>
+<h3>Assets</h3>
+<div class="card" style="padding:0">
+  <div style="overflow:auto">
+    <table class="table align-middle">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Client</th>
+          <th>Title</th>
+          <th>Kind</th>
+          <th>Status</th>
+          <th>Scheduled</th>
+          <th>Review</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for x in assets %}
+        <tr>
+          <td>{{ x.id }}</td>
+          <td>{{ x.client.company_name if x.client else '-' }}</td>
+          <td>{{ x.title }}</td>
+          <td>{{ x.kind }}</td>
+          <td>{{ x.status }}</td>
+          <td>{{ x.scheduled_for.strftime('%Y-%m-%d %H:%M UTC') if x.scheduled_for else '-' }}</td>
+          <td>
+            {% if x.public_token %}
+              <input value="{{ request.host_url.rstrip('/') }}/review/{{ x.public_token }}" style="width:340px" readonly />
+              <button class="btn" onclick="navigator.clipboard.writeText(this.previousElementSibling.value)">Copy</button>
+            {% else %}
+              <span class="muted">no token</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="muted" style="padding:12px">No assets.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

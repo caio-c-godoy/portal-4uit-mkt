@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% set title = "Admin — 4UIT" %}
+{% set heading = "Admin (Read-only)" %}
+{% set subheading = "Contracts, Access Requests & Assets" %}
+{% block content %}
+  <div style="display:flex; gap:12px; flex-wrap:wrap">
+    <a class="btn" href="{{ url_for('assets_list') }}">Assets</a>
+    <a class="btn" href="{{ url_for('clients_list') }}" style="background:#6b7280">Clients</a>
+  </div>
+
+  <h3 style="margin-top:14px">Contracts</h3>
+  <div class="card" style="padding:0">
+    <div style="overflow:auto">
+      <table style="width:100%; border-collapse:collapse">
+        <thead>
+          <tr style="background:rgba(13,110,253,.06)">
+            <th style="text-align:left;padding:10px">#</th>
+            <th style="text-align:left;padding:10px">Client</th>
+            <th style="text-align:left;padding:10px">Signer</th>
+            <th style="text-align:left;padding:10px">Email</th>
+            <th style="text-align:left;padding:10px">Signed (UTC)</th>
+            <th style="text-align:left;padding:10px">IP</th>
+            <th style="text-align:left;padding:10px">Signature</th>
+            <th style="text-align:left;padding:10px">PDF</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for c in contracts %}
+          <tr style="border-top:1px solid var(--ff-border)">
+            <td style="padding:10px">{{ c.id }}</td>
+            <td style="padding:10px">{{ c.client.company_name if c.client else '-' }}</td>
+            <td style="padding:10px">{{ c.signer_name or '-' }}</td>
+            <td style="padding:10px">{{ c.signer_email or '-' }}</td>
+            <td style="padding:10px">{{ (c.signed_at.isoformat()) if c.signed_at else '-' }}</td>
+            <td style="padding:10px">{{ c.signer_ip or '-' }}</td>
+            <td style="padding:10px">
+              {% if c.signature_path %}
+                <a class="link" href="/{{ c.signature_path }}">view</a>
+              {% else %}-{% endif %}
+            </td>
+            <td style="padding:10px">
+              <a class="btn btn-ghost" href="{{ url_for('contract_pdf', contract_id=c.id) }}">Download PDF</a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <hr/>
+  <h3>Access Requests</h3>
+  <div class="card" style="padding:0">
+    <div style="overflow:auto">
+      <table style="width:100%; border-collapse:collapse">
+        <thead>
+          <tr style="background:rgba(13,110,253,.06)">
+            <th style="text-align:left;padding:10px">#</th>
+            <th style="text-align:left;padding:10px">Client</th>
+            <th style="text-align:left;padding:10px">Google Ads</th>
+            <th style="text-align:left;padding:10px">Meta Ads</th>
+            <th style="text-align:left;padding:10px">Website</th>
+            <th style="text-align:left;padding:10px">Submitted (UTC)</th>
+            <th style="text-align:left;padding:10px">IP</th>
+            <th style="text-align:left;padding:10px">Signature</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for a in access_list %}
+          <tr style="border-top:1px solid var(--ff-border)">
+            <td style="padding:10px">{{ a.id }}</td>
+            <td style="padding:10px">{{ a.client.company_name if a.client else '-' }}</td>
+            <td style="padding:10px">{{ a.google_ads_id or '-' }}</td>
+            <td style="padding:10px">{{ a.meta_ads_account_id or '-' }}</td>
+            <td style="padding:10px">{{ a.website_url or '-' }}</td>
+            <td style="padding:10px">{{ (a.submitted_at.isoformat()) if a.submitted_at else '-' }}</td>
+            <td style="padding:10px">{{ a.signer_ip or '-' }}</td>
+            <td style="padding:10px">
+              {% if a.signature_path %}
+                <a class="link" href="/{{ a.signature_path }}">view</a>
+              {% else %}-{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <hr/>
+  <h3>Assets</h3>
+  <div class="card" style="padding:0">
+    <div style="overflow:auto">
+      <table style="width:100%; border-collapse:collapse">
+        <thead>
+          <tr style="background:rgba(13,110,253,.06)">
+            <th style="text-align:left;padding:10px">#</th>
+            <th style="text-align:left;padding:10px">Client</th>
+            <th style="text-align:left;padding:10px">Title</th>
+            <th style="text-align:left;padding:10px">Kind</th>
+            <th style="text-align:left;padding:10px">Status</th>
+            <th style="text-align:left;padding:10px">Scheduled</th>
+            <th style="text-align:left;padding:10px">Review link</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for x in assets %}
+          <tr style="border-top:1px solid var(--ff-border)">
+            <td style="padding:10px">{{ x.id }}</td>
+            <td style="padding:10px">{{ x.client.company_name if x.client else '-' }}</td>
+            <td style="padding:10px">{{ x.title }}</td>
+            <td style="padding:10px">{{ x.kind }}</td>
+            <td style="padding:10px">{{ x.status }}</td>
+            <td style="padding:10px">{{ x.scheduled_for.strftime('%Y-%m-%d %H:%M UTC') if x.scheduled_for else '-' }}</td>
+            <td style="padding:10px">
+              {% if x.public_token %}
+                <input value="{{ request.host_url.rstrip('/') }}/review/{{ x.public_token }}" style="width:340px" readonly />
+                <button class="btn" onclick="navigator.clipboard.writeText(this.previousElementSibling.value)">Copy</button>
+              {% else %}
+                <span class="muted">no token</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+{% endblock %}

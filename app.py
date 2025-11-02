@@ -353,31 +353,40 @@ def get_request_ip():
 
 
 # ======= Assinatura: fallback local legado =======
-def save_signature_data_url_local(data_url: str) -> str:
+def save_signature_data_url(data_url: str) -> str:
     """
-    Versão LEGADA (local) – salva em UPLOAD_SIGS_DIR (persistente no App Service).
-    Retorna caminho relativo tipo 'uploads/signatures/xxx.png'
+    Salva o dataURL da assinatura em uploads/signatures/<uuid>.png
+    e já NORMALIZA para traço preto + fundo transparente.
+    Retorna o caminho relativo que já existia antes.
     """
     if not data_url.startswith("data:image"):
         raise ValueError("Invalid signature data URL")
-    header, b64data = data_url.split(",", 1)
-    if "image/svg" in header:
-        ext = "svg"
-    elif "image/jpeg" in header:
-        ext = "jpg"
-    else:
-        ext = "png"
 
-    filename = f"{uuid.uuid4().hex}.{ext}"
+    header, b64data = data_url.split(",", 1)
+    # sempre salva como PNG (independente do header)
+    filename = f"{uuid.uuid4().hex}.png"
     rel_path = os.path.join("uploads", "signatures", filename)
-    abs_path = os.path.join(UPLOAD_SIGS_DIR, filename)
+    abs_path = os.path.join(BASE_DIR, rel_path)
+    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+
     with open(abs_path, "wb") as f:
         f.write(base64.b64decode(b64data))
 
-    if PIL_AVAILABLE:
-        _normalize_signature_image(abs_path)
+    # >>> normaliza pra preto e fundo transparente (usa sua função existente)
+    try:
+        norm_path = normalize_signature_png(abs_path)
+        if norm_path and os.path.abspath(norm_path) != os.path.abspath(abs_path):
+            # substitui o arquivo salvo pelo normalizado
+            try:
+                os.replace(norm_path, abs_path)
+            except Exception:
+                pass
+    except Exception:
+        # se der algo errado, mantém o arquivo original
+        pass
 
     return rel_path
+
 
 
 def save_signature_unified(data_url: str) -> dict:
@@ -617,10 +626,17 @@ def _wrap_lines_kv(canvas, key: str, value: str, y: float, max_width: float, fon
 
 
 def _generate_contract_pdf(contract) -> str | None:
+    """
+    Gera o PDF do contrato e salva em uploads/contracts.
+    Retorna caminho absoluto ou None se indisponível.
+    """
     if not REPORTLAB_AVAILABLE:
         return None
+    try:
+        from reportlab.pdfbase.pdfmetrics import stringWidth
+    except Exception:
+        return None
 
-    from reportlab.pdfbase.pdfmetrics import stringWidth
 
     PAGE_W, PAGE_H = LETTER
     MARGIN_L = 72

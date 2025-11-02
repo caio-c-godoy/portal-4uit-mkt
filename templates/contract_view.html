@@ -1,0 +1,18 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="container py-4">
+  <h3>Contract #{{ contract.id }}</h3>
+  <p><b>Client:</b> {{ client.company_name }}</p>
+  <p><b>Signer:</b> {{ contract.signer_name }} &lt;{{ contract.signer_email }}&gt;</p>
+  <p><b>Signed at (UTC):</b> {{ contract.signed_at }}</p>
+  <hr>
+  <article class="prose" style="white-space:pre-wrap">{{ contract.contract_text }}</article>
+  <hr>
+  {% if signature_url %}
+    <h6>Signature</h6>
+    <img src="{{ signature_url }}" alt="Signature" style="max-width:520px;border:1px solid #eee;background:#fff">
+  {% else %}
+    <em>No signature on file.</em>
+  {% endif %}
+</div>
+{% endblock %}

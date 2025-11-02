@@ -11,6 +11,7 @@ from flask import current_app
 
 
 
+
 from io import BytesIO
 from reportlab.lib.units import inch
 
@@ -24,7 +25,7 @@ from flask import (
     flash, abort, make_response
 )
 from dotenv import load_dotenv
-from werkzeug.utils import secure_filename
+from werkzeug.utils import secure_filename, safe_join
 
 # DB / Models
 from extensions import db
@@ -40,6 +41,7 @@ from flask_login import (
 try:
     from reportlab.lib.pagesizes import LETTER
     from reportlab.pdfgen import canvas as rl_canvas
+    from reportlab.lib.pagesizes import A4
     from reportlab.lib.utils import ImageReader
     REPORTLAB_AVAILABLE = True
 except Exception:
@@ -1003,15 +1005,20 @@ def admin_assets_ensure_tokens():
     db.session.commit()
     return jsonify({"ok": True, "updated": len(missing)})
 
+# ===== UPLOAD ROOT =====
+UPLOAD_ROOT = os.path.join(app.root_path, "uploads")
+
+# Rota única para servir arquivos de uploads/ com segurança
 @app.route("/uploads/<path:filename>")
 def serve_uploads(filename):
-    # raiz onde você guarda os arquivos
-    upload_root = os.path.join(app.root_path, "uploads")
-    full_path = safe_join(upload_root, filename)  # <- agora do werkzeug
+    full_path = safe_join(UPLOAD_ROOT, filename)
     if not full_path or not os.path.isfile(full_path):
         abort(404)
-    # define mimetype opcionalmente
-    return send_file(full_path)
+    # guess mime
+    mime, _ = mimetypes.guess_type(full_path)
+    return send_file(full_path, mimetype=mime or "application/octet-stream")
+
+
 
 # -------------------------------------------------
 # Public pages
@@ -2060,28 +2067,17 @@ def admin_home():
 # ---------------------------------------------
 # Admin — Contracts (view / pdf)
 # ---------------------------------------------
-# ------ VIEW do contrato no Admin (corrige 500 ao clicar "View") ------
-from flask import safe_join
 
 @app.route("/admin/contracts/<int:contract_id>")
 @login_required
 def admin_contract_view(contract_id):
     contract = Contract.query.get_or_404(contract_id)
     client = contract.client
-
-    # resolve caminho da assinatura se existir
-    signature_url = None
-    if contract.signature_path:
-        # assinatura é servida via /uploads/<...>; não abrir do FS direto
-        # garante que a URL pública exista:
-        # ex: signature_path="signatures/7dd36a....png"
-        signature_url = url_for("serve_uploads", filename=contract.signature_path)
-
+    # NADA de abrir arquivo aqui — só manda o path pro template
     return render_template(
-        "admin/contract_view.html",
+        "admin/contract_view.html",  # seu template existente
         contract=contract,
-        client=client,
-        signature_url=signature_url,
+        client=client
     )
 
 
@@ -2489,25 +2485,63 @@ def portal_access_requests():
 # --------------- ROTA: Portal (cliente) baixar PDF do Access ----------------
 @app.route("/portal/access/<int:access_id>/pdf")
 def portal_access_pdf(access_id):
-    access = AccessRequest.query.get_or_404(access_id)
+    ar = AccessRequest.query.get_or_404(access_id)
 
-    # Segurança: só permitir o próprio cliente/authed ver.
-    # Se você já tem @login_required do portal, mantenha.
-    # Caso seja link público, verifique token/owner aqui.
-    # (Mantive simples para não quebrar teu fluxo)
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    w, h = A4
+    y = h - 50
 
-    try:
-        pdf_bytes = generate_accessrequest_pdf(access)
-    except Exception as e:
-        app.logger.exception("Access PDF generation failed")
-        # Mensagem antiga: "PDF engine not available..." vinha daqui
-        abort(500, description="PDF engine not available or failed to generate. Check ReportLab and logs.")
+    def line(txt=""):
+        nonlocal y
+        c.drawString(40, y, str(txt) if txt is not None else "")
+        y -= 18
 
+    c.setTitle(f"AccessRequest-{access_id}")
+    c.setFont("Helvetica-Bold", 14); line("Access Information (Ads / Analytics / Domain / Hosting)")
+    c.setFont("Helvetica", 11); y -= 8
+
+    # bloco 1 — ids e contas
+    line(f"Client ID: {ar.client_id}")
+    line(f"Instagram: {ar.instagram_user or '-'}")
+    line(f"Facebook Page: {ar.facebook_page or '-'}")
+    line(f"Meta BM ID: {ar.meta_bm_id or '-'}")
+    line(f"Meta Ads Account ID: {ar.meta_ads_account_id or '-'}")
+    line(f"Google Ads ID: {ar.google_ads_id or '-'}")
+
+    # bloco 2 — website/hosting/domain
+    y -= 8
+    line(f"Website: {ar.website_url or '-'}")
+    line(f"Hosting: {ar.hosting or '-'}")
+    line(f"Domain Registrar: {ar.domain_registrar or '-'}")
+
+    # bloco 3 — submissão/assinatura
+    y -= 8
+    line(f"Submitted at (UTC): {ar.submitted_at}")
+    line(f"Signer: {ar.signer_name or '-'}  <{ar.signer_email or '-'}>")
+    line(f"IP: {ar.signer_ip or '-'}")
+
+    # assinatura, se houver arquivo salvo
+    if ar.signature_path:
+        try:
+            sig_path = safe_join(UPLOAD_ROOT, ar.signature_path)
+            if sig_path and os.path.isfile(sig_path):
+                # desenha a assinatura no PDF
+                img_w, img_h = 260, 80
+                c.drawImage(sig_path, 40, max(60, y - img_h - 10),
+                            width=img_w, height=img_h,
+                            preserveAspectRatio=True, mask='auto')
+        except Exception:
+            pass
+
+    c.showPage()
+    c.save()
+    buf.seek(0)
     return send_file(
-        BytesIO(pdf_bytes),
+        buf,
         mimetype="application/pdf",
-        as_attachment=True,
-        download_name=f"access_{access.id}.pdf",
+        download_name=f"access-{access_id}.pdf",
+        as_attachment=True
     )
 
 

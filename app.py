@@ -1010,14 +1010,9 @@ UPLOAD_ROOT = os.path.join(app.root_path, "uploads")
 
 # Rota única para servir arquivos de uploads/ com segurança
 @app.route("/uploads/<path:filename>")
-def serve_uploads(filename):
-    full_path = safe_join(UPLOAD_ROOT, filename)
-    if not full_path or not os.path.isfile(full_path):
-        abort(404)
-    # guess mime
-    mime, _ = mimetypes.guess_type(full_path)
-    return send_file(full_path, mimetype=mime or "application/octet-stream")
-
+def uploads(filename):
+    upload_folder = os.path.join(app.root_path, "uploads")
+    return send_from_directory(upload_folder, filename)
 
 
 # -------------------------------------------------
@@ -2069,15 +2064,16 @@ def admin_home():
 # ---------------------------------------------
 
 @app.route("/admin/contracts/<int:contract_id>")
-@login_required
 def admin_contract_view(contract_id):
     contract = Contract.query.get_or_404(contract_id)
-    client = contract.client
-    # NADA de abrir arquivo aqui — só manda o path pro template
+    client = Client.query.get(contract.client_id)
+    signature_url = None
+    if contract.signature_path:
+        # serve /uploads/<path> SEM usar flask.safe_join
+        signature_url = url_for("uploads", filename=contract.signature_path)
     return render_template(
-        "admin/contract_view.html",  # seu template existente
-        contract=contract,
-        client=client
+        "admin/contract_view.html",
+        contract=contract, client=client, signature_url=signature_url
     )
 
 

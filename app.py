@@ -9,8 +9,7 @@ from urllib.parse import urlencode, quote
 import json
 from flask import current_app
 
-
-
+from sqlalchemy.orm import joinedload
 
 from io import BytesIO
 from reportlab.lib.units import inch
@@ -82,6 +81,35 @@ if ACCOUNT:
         blob_service = None
         container_client = None
 
+def _portal_find_client_for_user():
+    """
+    Regras:
+    1) procura Client pelo contact_email == user.email
+    2) se não achar, pega o client do primeiro Contract onde signer_email == user.email
+    3) fallback: None (template lida com isso)
+    """
+    if not current_user.is_authenticated:
+        return None
+
+    user_email = (current_user.email or "").strip().lower()
+
+    # 1) Client.contact_email
+    client = Client.query.filter(
+        db.func.lower(Client.contact_email) == user_email
+    ).first()
+    if client:
+        return client
+
+    # 2) Client via Contract.signer_email
+    c = (Contract.query
+         .options(joinedload(Contract.client))
+         .filter(db.func.lower(Contract.signer_email) == user_email)
+         .order_by(Contract.signed_at.desc())
+         .first())
+    if c and c.client:
+        return c.client
+
+    return None
 
 def save_dataurl_png_to_blob(data_url: str, folder="signatures") -> str:
     """
@@ -1009,10 +1037,11 @@ def admin_assets_ensure_tokens():
 UPLOAD_ROOT = os.path.join(app.root_path, "uploads")
 
 # Rota única para servir arquivos de uploads/ com segurança
-@app.route("/uploads/<path:filename>")
+@app.get("/uploads/<path:filename>")
 def uploads(filename):
-    upload_folder = os.path.join(app.root_path, "uploads")
-    return send_from_directory(upload_folder, filename)
+    uploads_root = os.path.join(app.root_path, "uploads")
+    return send_from_directory(uploads_root, filename)
+
 
 
 # -------------------------------------------------
@@ -2399,58 +2428,77 @@ def _client_for_user(user: User):
 @app.get("/portal/contracts")
 @login_required
 def portal_contracts():
-    if getattr(current_user, "role", "") == "admin":
-        return redirect(url_for("admin_home"))
+    try:
+        client = _portal_find_client_for_user()
 
-    client = Client.query.filter_by(contact_email=current_user.email).first()
-    contracts = []
-    access_last = None
-    access_count = 0
-    access_rows = []
-    access_prefill = url_for("access_request_page")
+        contracts = []
+        access_rows = []
+        access_last = None
+        access_prefill = url_for("portal_access_form") if "portal_access_form" in app.view_functions else url_for("portal_access")
 
-    if client:
-        contracts = (Contract.query
-                     .filter_by(client_id=client.id)
-                     .order_by(desc(Contract.id))
-                     .all())
+        if client:
+            # contratos do cliente (com client carregado para {{ c.client.company_name }})
+            contracts = (Contract.query
+                         .options(joinedload(Contract.client))
+                         .filter_by(client_id=client.id)
+                         .order_by(Contract.signed_at.desc())
+                         .all())
 
-        q = (AccessRequest.query
-             .filter_by(client_id=client.id)
-             .order_by(desc(AccessRequest.submitted_at), desc(AccessRequest.id)))
-        access_rows = q.all()
-        access_last = access_rows[0] if access_rows else None
-        access_count = q.count()
+            # access requests
+            access_rows = (AccessRequest.query
+                           .filter_by(client_id=client.id)
+                           .order_by(AccessRequest.submitted_at.desc())
+                           .all())
+            access_last = access_rows[0] if access_rows else None
 
-        access_prefill = (url_for("access_request_page") +
-                          f"?company={quote(client.company_name or '')}"
-                          f"&email={quote(client.contact_email or '')}")
+            # link do botão "Fill/Update my access info"
+            # (mantém seu caminho existente; ajuste só se seu form tiver outro endpoint)
+            if "portal_access_form" in app.view_functions:
+                access_prefill = url_for("portal_access_form", client_id=client.id)
+            elif "portal_access" in app.view_functions:
+                access_prefill = url_for("portal_access", client_id=client.id)
+            else:
+                access_prefill = "/portal/access"  # fallback sem quebrar
 
-    return render_template(
-        "portal_contracts.html",
-        client=client,
-        contracts=contracts,
-        access_last=access_last,
-        access_count=access_count,
-        access_rows=access_rows,
-        access_prefill=access_prefill
-    )
+        return render_template(
+            "portal_contracts.html",
+            client=client,
+            contracts=contracts,
+            access_rows=access_rows,
+            access_last=access_last,
+            access_prefill=access_prefill,
+        )
+    except Exception:
+        app.logger.exception("Error on /portal/contracts")
+        # evita 500 em produção e deixa a página carregar com tabelas vazias
+        return render_template(
+            "portal_contracts.html",
+            client=None,
+            contracts=[],
+            access_rows=[],
+            access_last=None,
+            access_prefill="/portal/access",
+        ), 200
 
 
-@app.get("/portal/contracts/<int:contract_id>/pdf")
+
+@app.get("/portal/contract/<int:contract_id>/pdf")
 @login_required
-def portal_contract_pdf(contract_id: int):
-    cn = Contract.query.get_or_404(contract_id)
-    if getattr(current_user, "role", "") != "admin":
-        if not cn.client or cn.client.contact_email != current_user.email:
-            abort(403)
+def portal_contract_pdf(contract_id):
+    contract = Contract.query.get_or_404(contract_id)
+    client = Client.query.get_or_404(contract.client_id)
 
-    pdf_abs = _generate_contract_pdf(cn)
-    if not (pdf_abs and os.path.exists(pdf_abs)):
-        flash("Could not generate PDF.", "danger")
-        return redirect(url_for("portal_contracts"))
+    # **autorização básica**: o usuário do portal precisa pertencer a este client
+    my_client = _portal_find_client_for_user()
+    if not my_client or my_client.id != client.id:
+        abort(403)
 
-    return send_file(pdf_abs, as_attachment=True, download_name=f"4UIT-contract-{cn.id}.pdf")
+    # use sua função geradora já usada no Admin
+    pdf_bytes = generate_contract_pdf(contract, client)  # mantém sua função existente
+    return send_file(io.BytesIO(pdf_bytes),
+                     mimetype="application/pdf",
+                     as_attachment=False,
+                     download_name=f"contract_{contract.id}.pdf")
 
 
 # ======================

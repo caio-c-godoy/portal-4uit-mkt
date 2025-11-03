@@ -8,7 +8,7 @@ from markupsafe import Markup, escape
 from urllib.parse import urlencode, quote
 import json
 from flask import current_app
-
+from jinja2 import TemplateNotFound
 from sqlalchemy.orm import joinedload
 
 from io import BytesIO
@@ -82,32 +82,32 @@ if ACCOUNT:
         container_client = None
 
 def _portal_find_client_for_user():
-    """
-    Regras:
-    1) procura Client pelo contact_email == user.email
-    2) se não achar, pega o client do primeiro Contract onde signer_email == user.email
-    3) fallback: None (template lida com isso)
-    """
     if not current_user.is_authenticated:
         return None
-
     user_email = (current_user.email or "").strip().lower()
 
-    # 1) Client.contact_email
-    client = Client.query.filter(
-        db.func.lower(Client.contact_email) == user_email
-    ).first()
-    if client:
-        return client
+    # 1) Client.contact_email === user.email
+    c = Client.query.filter(db.func.lower(Client.contact_email) == user_email).first()
+    if c:
+        return c
 
-    # 2) Client via Contract.signer_email
-    c = (Contract.query
-         .options(joinedload(Contract.client))
-         .filter(db.func.lower(Contract.signer_email) == user_email)
-         .order_by(Contract.signed_at.desc())
-         .first())
-    if c and c.client:
-        return c.client
+    # 2) Client via Contract.signer_email === user.email
+    ct = (Contract.query
+          .options(joinedload(Contract.client))
+          .filter(db.func.lower(Contract.signer_email) == user_email)
+          .order_by(Contract.signed_at.desc())
+          .first())
+    if ct and ct.client:
+        return ct.client
+
+    # 3) Client via AccessRequest.signer_email === user.email (caso ainda não tenha contrato)
+    ar = (AccessRequest.query
+          .options(joinedload(AccessRequest.client))
+          .filter(db.func.lower(AccessRequest.signer_email) == user_email)
+          .order_by(AccessRequest.submitted_at.desc())
+          .first())
+    if ar and ar.client:
+        return ar.client
 
     return None
 
@@ -2434,31 +2434,22 @@ def portal_contracts():
         contracts = []
         access_rows = []
         access_last = None
-        access_prefill = url_for("portal_access_form") if "portal_access_form" in app.view_functions else url_for("portal_access")
+
+        # link do botão "Fill/Update"
+        access_prefill = url_for("portal_access")
 
         if client:
-            # contratos do cliente (com client carregado para {{ c.client.company_name }})
             contracts = (Contract.query
                          .options(joinedload(Contract.client))
                          .filter_by(client_id=client.id)
                          .order_by(Contract.signed_at.desc())
                          .all())
 
-            # access requests
             access_rows = (AccessRequest.query
                            .filter_by(client_id=client.id)
                            .order_by(AccessRequest.submitted_at.desc())
                            .all())
             access_last = access_rows[0] if access_rows else None
-
-            # link do botão "Fill/Update my access info"
-            # (mantém seu caminho existente; ajuste só se seu form tiver outro endpoint)
-            if "portal_access_form" in app.view_functions:
-                access_prefill = url_for("portal_access_form", client_id=client.id)
-            elif "portal_access" in app.view_functions:
-                access_prefill = url_for("portal_access", client_id=client.id)
-            else:
-                access_prefill = "/portal/access"  # fallback sem quebrar
 
         return render_template(
             "portal_contracts.html",
@@ -2469,17 +2460,13 @@ def portal_contracts():
             access_prefill=access_prefill,
         )
     except Exception:
-        app.logger.exception("Error on /portal/contracts")
-        # evita 500 em produção e deixa a página carregar com tabelas vazias
+        app.logger.exception("portal_contracts failed")
+        # não deixa cair 500
         return render_template(
             "portal_contracts.html",
-            client=None,
-            contracts=[],
-            access_rows=[],
-            access_last=None,
-            access_prefill="/portal/access",
+            client=None, contracts=[], access_rows=[], access_last=None,
+            access_prefill=url_for("portal_access"),
         ), 200
-
 
 
 @app.get("/portal/contract/<int:contract_id>/pdf")
@@ -2504,32 +2491,52 @@ def portal_contract_pdf(contract_id):
 # ======================
 # Portal — ACCESS REQUESTS
 # ======================
-@app.get("/portal/access-requests")
+@app.get("/portal/access")
 @login_required
-def portal_access_requests():
-    if getattr(current_user, "role", "") == "admin":
-        return redirect(url_for("assets_list"))
+def portal_access():
+    client = _portal_find_client_for_user()
+    if not client:
+        flash("We couldn't link your user to a client. Please contact support.", "warning")
+        return redirect(url_for("portal_contracts"))
 
-    c = _client_for_user(current_user)
-    access = []
-    access_form_url = url_for("access_request_page")
-    if c:
-        access = (AccessRequest.query
-                  .filter(AccessRequest.client_id == c.id)
-                  .order_by(AccessRequest.id.desc())
-                  .all())
-        access_form_url = (url_for("access_request_page") +
-                           f"?company={quote(c.company_name or '')}&email={quote(c.contact_email or '')}")
+    # últimos envios para mostrar contexto no topo do form (opcional)
+    access_rows = (AccessRequest.query
+                   .filter_by(client_id=client.id)
+                   .order_by(AccessRequest.submitted_at.desc())
+                   .all())
+    access_last = access_rows[0] if access_rows else None
 
-    return render_template("portal_access_requests.html",
-                           access_list=access,
-                           access_form_url=access_form_url)
+    # tenta abrir seu form dedicado, senão mostra um fallback simples
+    try:
+        return render_template("portal_access_form.html",
+                               client=client,
+                               access_last=access_last,
+                               access_rows=access_rows)
+    except TemplateNotFound:
+        return render_template("portal_access.html",
+                               client=client,
+                               access_last=access_last,
+                               access_rows=access_rows)
+
 
 
 # --------------- ROTA: Portal (cliente) baixar PDF do Access ----------------
 @app.route("/portal/access/<int:access_id>/pdf")
+@login_required
 def portal_access_pdf(access_id):
+    # autorização: usuário logado precisa pertencer ao mesmo Client do AccessRequest
     ar = AccessRequest.query.get_or_404(access_id)
+
+    # tenta vincular o usuário ao Client (usa o helper já sugerido)
+    my_client = _portal_find_client_for_user()
+    if not my_client or my_client.id != ar.client_id:
+        abort(403)
+
+    # ======= A PARTIR DAQUI É O SEU CÓDIGO ORIGINAL =======
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import A4
+    from io import BytesIO
+    import os
 
     buf = BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
@@ -2568,9 +2575,8 @@ def portal_access_pdf(access_id):
     # assinatura, se houver arquivo salvo
     if ar.signature_path:
         try:
-            sig_path = safe_join(UPLOAD_ROOT, ar.signature_path)
+            sig_path = safe_join(UPLOAD_ROOT, ar.signature_path)  # <- seguro
             if sig_path and os.path.isfile(sig_path):
-                # desenha a assinatura no PDF
                 img_w, img_h = 260, 80
                 c.drawImage(sig_path, 40, max(60, y - img_h - 10),
                             width=img_w, height=img_h,
@@ -2585,7 +2591,7 @@ def portal_access_pdf(access_id):
         buf,
         mimetype="application/pdf",
         download_name=f"access-{access_id}.pdf",
-        as_attachment=True
+        as_attachment=True  # mantém "Download PDF" como arquivo
     )
 
 

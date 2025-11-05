@@ -4,6 +4,9 @@
 {% set subheading = a.title %}
 
 {% block content %}
+{# Gera URL pública (local ou Azure) para o preview #}
+{% set preview_url = asset_public_url(a) %}
+
 <div class="card">
   <div class="grid" style="grid-template-columns:1fr 1fr;gap:12px">
     <div>
@@ -35,13 +38,20 @@
         {% if a.kind in ('image','copy') %}
           <img src="{{ preview_url }}" alt="" style="max-width:100%;border:1px solid var(--ff-border);border-radius:12px"/>
         {% else %}
-          <a class="btn" href="{{ preview_url }}" target="_blank">Open file</a>
+          <a class="btn" href="{{ preview_url }}" target="_blank" rel="noopener">Open file</a>
         {% endif %}
       {% else %}
         <div class="muted">No file uploaded.</div>
       {% endif %}
     </div>
   </div>
+</div>
+
+<div class="card" style="margin-top:12px; display:flex; gap:8px; align-items:center; justify-content:flex-end">
+  <a class="btn" href="{{ url_for('asset_edit', asset_id=a.id) }}">Edit</a>
+  <form method="post" action="{{ url_for('asset_delete', asset_id=a.id) }}" onsubmit="return confirm('Delete this asset? This cannot be undone.');">
+    <button class="btn btn-danger" type="submit">Delete</button>
+  </form>
 </div>
 
 <div class="card" style="margin-top:12px">

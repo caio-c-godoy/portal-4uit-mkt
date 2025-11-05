@@ -10,8 +10,14 @@
 
 <div class="card">
   {% if storage_url %}
-    {% if asset.kind in ('image','copy') %}
-      <img src="{{ storage_url }}" alt="" style="max-width:100%;border:1px solid var(--ff-border);border-radius:12px"/>
+    {% set preview_src = thumb_url or storage_url %}
+    {% if asset.file_mime and asset.file_mime.startswith('video/') %}
+      <video controls style="max-width:100%;border:1px solid var(--ff-border);border-radius:12px">
+        <source src="{{ storage_url }}" type="{{ asset.file_mime }}">
+        Your browser does not support the video tag.
+      </video>
+    {% elif asset.kind in ('image','copy') %}
+      <img src="{{ preview_src }}" alt="" style="max-width:100%;border:1px solid var(--ff-border);border-radius:12px"/>
     {% else %}
       <a class="btn" href="{{ storage_url }}" target="_blank" rel="noopener">Open file</a>
     {% endif %}
@@ -74,8 +80,7 @@
       try {
         const now = new Date();
         now.setHours(now.getUTCHours() + 2);
-        const iso = new Date(now.toISOString()); // normalized UTC
-        // keep it simple: full ISO with Z (UTC)
+        const iso = new Date(now.toISOString());
         scheduled.value = iso.toISOString();
       } catch (e) {}
     });

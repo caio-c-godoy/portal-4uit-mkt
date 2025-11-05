@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% set title = "Edit Asset — 4UIT" %}
+{% set heading = "Edit asset" %}
+{% set subheading = a.title %}
+
+{% block content %}
+<div class="card">
+  <form method="post" enctype="multipart/form-data" class="grid" style="grid-template-columns:1fr 1fr; gap:12px">
+
+    <div>
+      <label class="ff-label">Client</label>
+      <select class="ff-input" name="client_id" required>
+        {% for c in clients %}
+          <option value="{{ c.id }}" {% if a.client_id==c.id %}selected{% endif %}>{{ c.company_name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div>
+      <label class="ff-label">Kind</label>
+      <select class="ff-input" name="kind">
+        {% for k in ["image","video","audio","document","copy","other"] %}
+          <option value="{{k}}" {% if a.kind==k %}selected{% endif %}>{{k}}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div style="grid-column:1 / -1">
+      <label class="ff-label">Title</label>
+      <input class="ff-input" name="title" value="{{ a.title }}" required>
+    </div>
+
+    <div style="grid-column:1 / -1">
+      <label class="ff-label">Description</label>
+      <textarea class="ff-input" name="description" rows="3">{{ a.description or "" }}</textarea>
+    </div>
+
+    <div>
+      <label class="ff-label">Status</label>
+      <select class="ff-input" name="status">
+        {% for s in ["pending","approved","rejected","posted"] %}
+          <option value="{{s}}" {% if a.status==s %}selected{% endif %}>{{s}}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div>
+      <label class="ff-label">External URL (optional)</label>
+      <input class="ff-input" name="external_url" value="{{ a.external_url or '' }}" placeholder="https://...">
+    </div>
+
+    <div style="grid-column:1 / -1">
+      <div class="muted" style="margin-bottom:6px">Current file</div>
+      {% if a.storage_path %}
+        <div style="display:flex; gap:10px; align-items:center">
+          <a class="btn btn-ghost" href="/{{ a.storage_path }}" target="_blank" rel="noopener">Open current file</a>
+          {% if a.thumbnail_path %}
+            <img src="/{{ a.thumbnail_path }}" alt="" style="height:40px;border:1px solid var(--ff-border);border-radius:6px">
+          {% endif %}
+        </div>
+      {% else %}
+        <div class="muted">No file uploaded.</div>
+      {% endif %}
+    </div>
+
+    <div style="grid-column:1 / -1">
+      <label class="ff-label">Replace file (optional)</label>
+      <input class="ff-input" type="file" name="file" accept="*/*">
+      <div class="muted" style="margin-top:6px">If you upload a new file, the old one (and its thumbnail) will be removed.</div>
+    </div>
+
+    <div style="grid-column:1 / -1; display:flex; gap:10px; flex-wrap:wrap; margin-top:8px">
+      <button class="btn">Save changes</button>
+      <a class="btn btn-secondary" href="{{ url_for('asset_detail', asset_id=a.id) }}">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

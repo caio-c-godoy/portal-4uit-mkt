@@ -87,7 +87,7 @@
           <td>{{ r.signer_name or "-" }}</td>
           <td>{{ r.signer_email or "-" }}</td>
           <td>
-            <a class="btn" href="{{ url_for('portal_access_pdf', ar_id=r.id) }}">Download PDF</a>
+            <a class="btn" href="{{ url_for('portal_access_pdf', access_id=r.id) }}">Download PDF</a>
           </td>
         </tr>
         {% endfor %}

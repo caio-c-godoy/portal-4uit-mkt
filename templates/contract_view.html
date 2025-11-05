@@ -1,15 +1,13 @@
-{% extends "admin/base.html" %}
+{% extends "base.html" %}
 {% block content %}
 <div class="container py-4">
 
   <div class="d-flex align-items-center justify-content-between mb-3">
     <h3 class="mb-0">Contract #{{ contract.id }}</h3>
     <div class="d-flex gap-2">
-      {# Ver PDF em nova aba (mesma rota de PDF; o browser geralmente pré-visualiza) #}
       <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('admin_contract_pdf', contract_id=contract.id) }}" target="_blank" rel="noopener">
         <i class="bi bi-eye me-1"></i> View PDF
       </a>
-      {# Força download (mesma rota; o header controla, mas deixamos o botão separado) #}
       <a class="btn btn-primary btn-sm" href="{{ url_for('admin_contract_pdf', contract_id=contract.id) }}">
         <i class="bi bi-file-earmark-arrow-down me-1"></i> Download PDF
       </a>
@@ -49,8 +47,24 @@
       <div class="card shadow-sm">
         <div class="card-body">
           <h6 class="mb-2">Signature</h6>
-          {% if contract.signature_path %}
-            {% set _sig_url = url_for('serve_uploads', filename=contract.signature_path) %}
+
+          {# 1) Preferir signature_url enviado pelo app (SAS do Blob ou caminho local resolvido) #}
+          {% if signature_url %}
+            <div class="border rounded p-2 bg-white d-inline-block">
+              <img
+                src="{{ signature_url }}"
+                alt="Signature"
+                style="max-width:520px;max-height:220px;display:block;background:#fff" />
+            </div>
+            <div class="mt-2">
+              <a class="link-secondary small" href="{{ signature_url }}" target="_blank" rel="noopener">
+                Open signature file
+              </a>
+            </div>
+
+          {# 2) Fallback: se só houver signature_path, montar URL pública /uploads/signatures/... #}
+          {% elif contract.signature_path %}
+            {% set _sig_url = '/' + contract.signature_path.lstrip('/') %}
             <div class="border rounded p-2 bg-white d-inline-block">
               <img
                 src="{{ _sig_url }}"
@@ -62,6 +76,8 @@
                 Open signature file
               </a>
             </div>
+
+          {# 3) Sem assinatura #}
           {% else %}
             <em class="text-muted">No signature on file.</em>
           {% endif %}

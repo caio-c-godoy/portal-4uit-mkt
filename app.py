@@ -76,10 +76,73 @@ if ACCOUNT:
             container_client.create_container()  # idempotente
         except Exception:
             pass
-    except Exception as e:
+    except Exception:
         # Não falhar o app; seguimos com armazenamento local
         blob_service = None
         container_client = None
+
+
+# --------- HÍBRIDO: salvar arquivo local OU no Azure e gerar URL pública ---------
+USE_BLOB = bool(blob_service and container_client)
+
+def _store_file(bytes_data: bytes, rel_path: str, content_type: str | None = None) -> str:
+    """
+    Salva o arquivo:
+      - Se Azure Blob ativo: sobe em <CONTAINER>/<rel_path> e retorna 'blob:<rel_path>'
+      - Senão: salva em UPLOAD_ROOT/<rel_path> e retorna 'uploads/<rel_path>'
+    rel_path deve ser relativo à raiz lógica de uploads (ex.: 'assets/abc.jpg', 'assets/thumbs/abc.jpg').
+    """
+    rel = rel_path.lstrip("/").replace("\\", "/")
+    if USE_BLOB:
+        try:
+            bc = container_client.get_blob_client(rel)
+            bc.upload_blob(bytes_data, overwrite=True, content_type=content_type or "application/octet-stream")
+            return f"blob:{rel}"
+        except Exception as e:
+            # fallback local se der ruim no blob
+            pass
+
+    # LOCAL
+    abs_path = os.path.join(UPLOAD_ROOT, rel)
+    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+    with open(abs_path, "wb") as f:
+        f.write(bytes_data)
+    return f"uploads/{rel}"
+
+
+def _public_url(ref: str | None, minutes: int = 30) -> str | None:
+    """
+    Converte o valor armazenado no modelo (ex.: 'blob:assets/xyz.jpg' ou 'uploads/assets/xyz.jpg')
+    em uma URL pública consumível no front.
+
+    - 'blob:...' -> gera SAS temporário
+    - 'uploads/...' -> retorna '/uploads/...'
+    - qualquer outro valor -> tenta inferir
+    """
+    if not ref:
+        return None
+    ref = ref.replace("\\", "/").lstrip("/")
+    if ref.startswith("blob:"):
+        if not USE_BLOB:
+            return None
+        blob_name = ref.split("blob:", 1)[1]
+        try:
+            # Reaproveita seu gerador SAS
+            return make_sas_url(blob_name, minutes=minutes)
+        except Exception:
+            return None
+    if ref.startswith("uploads/"):
+        return "/" + ref
+    # Fallback: caso já venha só 'assets/...'
+    if ref.startswith("assets/"):
+        return "/uploads/" + ref
+    return "/" + ref
+
+
+def _guess_mime(filename: str, fallback: str = "application/octet-stream") -> str:
+    ctype, _ = mimetypes.guess_type(filename)
+    return ctype or fallback
+
 
 def _portal_find_client_for_user():
     if not current_user.is_authenticated:
@@ -159,7 +222,7 @@ def _draw_kv(c, y, k, v):
 
 def generate_accessrequest_pdf(access: AccessRequest) -> bytes:
     buf = BytesIO()
-    c = canvas.Canvas(buf, pagesize=LETTER)
+    c = rl_canvas.Canvas(buf, pagesize=LETTER)
     width, height = LETTER
 
     y = height - 72
@@ -218,11 +281,29 @@ app = Flask(
     template_folder="templates",
     instance_path=os.path.join(BASE_DIR, "instance"),
 )
+os.makedirs(app.instance_path, exist_ok=True)
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "dev")
-app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL") or (
-    "sqlite:///" + os.path.join(app.instance_path, "app.db")
-)
+# DATABASE — prioriza Postgres do .env; se não houver, cai no SQLite em instance/
+db_url = (os.getenv("DATABASE_URL") or "").strip()
+
+# Corrige URLs antigas "postgres://..." para o driver atual "postgresql+psycopg://"
+if db_url.startswith("postgres://"):
+    db_url = "postgresql+psycopg://" + db_url[len("postgres://"):]
+
+if db_url:
+    app.config["SQLALCHEMY_DATABASE_URI"] = db_url
+else:
+    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///" + os.path.join(app.instance_path, "app.db")
+
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+
+# Log simples pra confirmar no console o que entrou
+try:
+    print("[DB] SQLALCHEMY_DATABASE_URI ->", app.config["SQLALCHEMY_DATABASE_URI"])
+except Exception:
+    pass
+
+
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB
 
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -230,7 +311,7 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 app.config["PREFERRED_URL_SCHEME"] = "https"
 
 # --- Upload roots (persist on Azure App Service) ---
-UPLOAD_ROOT = os.environ.get("UPLOAD_ROOT", os.path.join("/home", "data", "uploads"))
+UPLOAD_ROOT = os.environ.get("UPLOAD_ROOT", os.path.join(BASE_DIR, "uploads"))
 os.makedirs(UPLOAD_ROOT, exist_ok=True)
 
 UPLOAD_SIGS_DIR = os.path.join(UPLOAD_ROOT, "signatures")
@@ -334,6 +415,59 @@ with app.app_context():
     db.create_all()
     seed_admin()
     seed_default_contract_template()
+
+
+# === Azure base opcional para blobs públicos ===============================
+AZURE_BLOB_PUBLIC_BASE = (os.environ.get("AZURE_BLOB_PUBLIC_BASE") or "").strip()
+
+# === Helper de URL pública para assets =====================================
+
+
+def asset_public_url(a):
+    """
+    Retorna URL pública do asset:
+    - external_url (se existir)
+    - Azure Blob (se AZURE_BLOB_PUBLIC_BASE estiver setado)
+    - Rotas locais /uploads/assets/... (file/thumb)
+    - Fallback para sua rota genérica serve_uploads
+    """
+    if not a:
+        return None
+
+    ext_url = getattr(a, "external_url", None)
+    if ext_url:
+        return ext_url
+
+    rel = (getattr(a, "storage_path", "") or "").replace("\\", "/")
+    if not rel:
+        return None
+
+    # Normaliza chave removendo o prefixo 'uploads/'
+    key = rel[8:] if rel.startswith("uploads/") else rel  # ex.: 'assets/xxx.mp4'
+
+    # Azure público
+    if AZURE_BLOB_PUBLIC_BASE:
+        return f"{AZURE_BLOB_PUBLIC_BASE.rstrip('/')}/{key.lstrip('/')}"
+
+    # Local — preferir rotas específicas
+    if key.startswith("assets/thumbs/"):
+        fname = key.split("/", 2)[-1]
+        return url_for("serve_asset_thumb", filename=fname)
+
+    if key.startswith("assets/"):
+        fname = key.split("/", 1)[-1]
+        return url_for("serve_asset_file", filename=fname)
+
+    # Fallback: usa sua rota genérica existente
+    return url_for("serve_uploads", filename=rel)
+
+# Registra nos globais do Jinja (garante disponibilidade)
+app.add_template_global(asset_public_url, name="asset_public_url")
+
+# E como context_processor (redundante de propósito — evita ordem de import)
+@app.context_processor
+def _inject_asset_helpers():
+    return dict(asset_public_url=asset_public_url)
 
 # ------------------ Email ------------------
 SMTP_HOST = os.getenv("SMTP_HOST", os.getenv("SMTP_SERVER", "smtp.office365.com"))
@@ -446,7 +580,7 @@ def save_signature_data_url(data_url: str) -> str:
     """
     Salva o dataURL da assinatura em uploads/signatures/<uuid>.png
     e já NORMALIZA para traço preto + fundo transparente.
-    Retorna o caminho relativo que já existia antes.
+    Retorna o caminho relativo público (uploads/signatures/arquivo.png).
     """
     if not data_url.startswith("data:image"):
         raise ValueError("Invalid signature data URL")
@@ -455,27 +589,24 @@ def save_signature_data_url(data_url: str) -> str:
     # sempre salva como PNG (independente do header)
     filename = f"{uuid.uuid4().hex}.png"
     rel_path = os.path.join("uploads", "signatures", filename)
-    abs_path = os.path.join(BASE_DIR, rel_path)
+    abs_path = os.path.join(UPLOAD_SIGS_DIR, filename)
     os.makedirs(os.path.dirname(abs_path), exist_ok=True)
 
     with open(abs_path, "wb") as f:
         f.write(base64.b64decode(b64data))
 
-    # >>> normaliza pra preto e fundo transparente (usa sua função existente)
+    # normaliza pra preto e fundo transparente
     try:
         norm_path = normalize_signature_png(abs_path)
         if norm_path and os.path.abspath(norm_path) != os.path.abspath(abs_path):
-            # substitui o arquivo salvo pelo normalizado
             try:
                 os.replace(norm_path, abs_path)
             except Exception:
                 pass
     except Exception:
-        # se der algo errado, mantém o arquivo original
         pass
 
     return rel_path
-
 
 
 def save_signature_unified(data_url: str) -> dict:
@@ -492,7 +623,7 @@ def save_signature_unified(data_url: str) -> dict:
         except Exception:
             pass
     # Fallback: local
-    rel = save_signature_data_url_local(data_url)
+    rel = save_signature_data_url(data_url)
     return {"blob_name": None, "local_relpath": rel}
 
 
@@ -606,6 +737,47 @@ def normalize_signature_png(src_path: str) -> str:
         return src_path
 
 
+#=========Helpers assets del/edit======
+
+# === Storage helpers: local e Azure Blob ===============================
+def _storage_is_azure() -> bool:
+    return bool(os.environ.get("AZURE_STORAGE_CONNECTION_STRING") and os.environ.get("AZURE_STORAGE_CONTAINER"))
+
+def _azure_blob_client():
+    from azure.storage.blob import BlobServiceClient  # pip install azure-storage-blob
+    conn_str = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
+    return BlobServiceClient.from_connection_string(conn_str)
+
+def _blob_container_name() -> str:
+    return os.environ.get("AZURE_STORAGE_CONTAINER")
+
+def _blob_name_from_rel(rel_path: str) -> str:
+    # Mantém a mesma estrutura de caminho (ex.: 'uploads/assets/abc.png')
+    return rel_path.replace("\\", "/").lstrip("/")
+
+def _delete_storage_file(rel_path: str) -> None:
+    """Remove um arquivo do storage (local ou Azure). Ignora silenciosamente se não existir."""
+    if not rel_path:
+        return
+    try:
+        if _storage_is_azure():
+            try:
+                bsc = _azure_blob_client()
+                container = _blob_container_name()
+                blob_name = _blob_name_from_rel(rel_path)
+                bsc.get_container_client(container).delete_blob(blob_name)
+            except Exception:
+                # Se der 'BlobNotFound' ou similar, apenas ignoramos
+                pass
+        else:
+            abs_path = os.path.join(BASE_DIR, rel_path)
+            if os.path.exists(abs_path):
+                os.remove(abs_path)
+    except Exception:
+        app.logger.exception("Falha ao remover arquivo do storage: %s", rel_path)
+
+
+
 # ===== Helpers para PDF com Blob =====
 def blob_to_temp_png(blob_name: str) -> str:
     tmp_path = os.path.join(TMP_DIR, f"{uuid.uuid4().hex}.png")
@@ -631,13 +803,14 @@ def contract_signature_abs_path(contract) -> str | None:
     # 2) Legado local
     sig_rel = getattr(contract, "signature_path", None)
     if sig_rel:
-        sig_abs = os.path.join(BASE_DIR, sig_rel.replace("/", os.sep))
-        if os.path.exists(sig_abs):
-            return sig_abs
-        # também testar na nova raiz persistente
-        alt_abs = os.path.join(UPLOAD_SIGS_DIR, os.path.basename(sig_rel))
-        if os.path.exists(alt_abs):
-            return alt_abs
+        # procurar tanto em BASE_DIR/uploads quanto em UPLOAD_ROOT/signatures
+        rel_name = os.path.basename(sig_rel)
+        cand1 = os.path.join(BASE_DIR, sig_rel.replace("/", os.sep))
+        cand2 = os.path.join(UPLOAD_SIGS_DIR, rel_name)
+        if os.path.exists(cand1):
+            return cand1
+        if os.path.exists(cand2):
+            return cand2
 
     return None
 
@@ -682,6 +855,30 @@ def _header_pdf(canvas, title: str) -> float:
     canvas.setStrokeColorRGB(0, 0, 0)
     return y_line - 14
 
+# (logo após _header_pdf)
+
+FOOTER_TEXT = "4UIT Solutions LLC • 7362 Futures Dr, Bay 15, Orlando, FL 32819 • https://4uit.us • contact@4uit.us"
+
+def _footer_pdf(canvas):
+    """Desenha o rodapé padrão em todas as páginas."""
+    from reportlab.lib.pagesizes import LETTER
+    PAGE_W, PAGE_H = LETTER
+    MARGIN_L = 72
+    MARGIN_R = 72
+    MARGIN_B = 48
+
+    canvas.setLineWidth(0.3)
+    canvas.setStrokeColorRGB(0.75, 0.75, 0.75)
+    canvas.line(MARGIN_L, MARGIN_B + 12, PAGE_W - MARGIN_R, MARGIN_B + 12)
+    canvas.setStrokeColorRGB(0, 0, 0)
+
+    canvas.setFont("Helvetica", 9)
+    # texto centralizado
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    w = stringWidth(FOOTER_TEXT, "Helvetica", 9)
+    x = (PAGE_W - w) / 2.0
+    canvas.drawString(x, MARGIN_B, FOOTER_TEXT)
+
 
 def _wrap_lines_kv(canvas, key: str, value: str, y: float, max_width: float, font="Helvetica", size=10, bullet=True):
     from reportlab.pdfbase.pdfmetrics import stringWidth
@@ -723,9 +920,9 @@ def _generate_contract_pdf(contract) -> str | None:
         return None
     try:
         from reportlab.pdfbase.pdfmetrics import stringWidth
+        from reportlab.lib.utils import ImageReader
     except Exception:
         return None
-
 
     PAGE_W, PAGE_H = LETTER
     MARGIN_L = 72
@@ -736,9 +933,20 @@ def _generate_contract_pdf(contract) -> str | None:
     CONTENT_W = PAGE_W - MARGIN_L - MARGIN_R
     LOGO_H = 28
 
+    FOOTER_TEXT = "4UIT Solutions LLC • 7362 Futures Dr, Bay 15, Orlando, FL 32819 • https://4uit.us • contact@4uit.us"
     logo_path = os.path.join(BASE_DIR, "static", "img", "4uit.png")
 
-    def header(canvas, title="Master Services Agreement"):
+    def footer(cnv):
+        cnv.saveState()
+        try:
+            cnv.setFont("Helvetica", 9)
+            cnv.setFillGray(0.35)
+            cnv.drawCentredString(PAGE_W / 2.0, 36, FOOTER_TEXT)
+        finally:
+            cnv.setFillGray(0)
+            cnv.restoreState()
+
+    def header(cnv, title="Master Services Agreement"):
         y_top = PAGE_H - MARGIN_T
         x = MARGIN_L
         logo_w = 0
@@ -747,24 +955,23 @@ def _generate_contract_pdf(contract) -> str | None:
                 img = ImageReader(logo_path)
                 iw, ih = img.getSize()
                 logo_w = int(LOGO_H * (iw / float(ih)))
-                canvas.drawImage(
+                cnv.drawImage(
                     img,
                     x, y_top - LOGO_H,
                     width=logo_w, height=LOGO_H,
-                    preserveAspectRatio=True,
-                    mask="auto",
+                    preserveAspectRatio=True, mask="auto",
                 )
             except Exception:
                 logo_w = 0
 
-        canvas.setFont("Helvetica-Bold", 14)
-        canvas.drawString(x + (logo_w + 10 if logo_w else 0), y_top - 2, title)
+        cnv.setFont("Helvetica-Bold", 14)
+        cnv.drawString(x + (logo_w + 10 if logo_w else 0), y_top - 2, title)
         y_line = y_top - LOGO_H - 6
-        canvas.setLineWidth(0.5)
-        canvas.setStrokeColorRGB(0.7, 0.7, 0.7)
-        canvas.line(MARGIN_L, y_line, PAGE_W - MARGIN_R, y_line)
-        canvas.setStrokeColorRGB(0, 0, 0)
-        return y_line - 14
+        cnv.setLineWidth(0.5)
+        cnv.setStrokeColorRGB(0.7, 0.7, 0.7)
+        cnv.line(MARGIN_L, y_line, PAGE_W - MARGIN_R, y_line)
+        cnv.setStrokeColorRGB(0, 0, 0)
+        return y_line - 14  # y inicial do conteúdo
 
     def wrap_lines(text: str, font_name: str = "Helvetica", font_size: int = 10):
         out = []
@@ -784,8 +991,10 @@ def _generate_contract_pdf(contract) -> str | None:
     abs_path = _contract_pdf_path(contract.id)
     c = rl_canvas.Canvas(abs_path, pagesize=LETTER)
 
+    # Página 1
     y = header(c)
 
+    # Metadados
     c.setFont("Helvetica", 10)
     meta = [
         f"Contract ID: {contract.id}",
@@ -797,32 +1006,35 @@ def _generate_contract_pdf(contract) -> str | None:
         meta.append(f"Signed (UTC): {contract.signed_at.isoformat()}")
     if contract.signer_ip:
         meta.append(f"IP: {contract.signer_ip}")
+
     for line in meta:
         if y - LINE < MARGIN_B:
-            c.showPage()
+            footer(c); c.showPage()
             y = header(c, "4UIT Solutions — MSA (cont.)")
             c.setFont("Helvetica", 10)
         c.drawString(MARGIN_L, y, line)
         y -= LINE
 
+    # Título “Contract text”
     y -= 6
     c.setFont("Helvetica-Bold", 11)
     if y - LINE < MARGIN_B:
-        c.showPage()
+        footer(c); c.showPage()
         y = header(c, "4UIT Solutions — MSA (cont.)")
     c.drawString(MARGIN_L, y, "Contract text:")
     y -= LINE
 
+    # Corpo do contrato
     c.setFont("Helvetica", 10)
     for line in wrap_lines(contract.contract_text or ""):
         if y - LINE < MARGIN_B:
-            c.showPage()
+            footer(c); c.showPage()
             y = header(c, "4UIT Solutions — MSA (cont.)")
             c.setFont("Helvetica", 10)
         c.drawString(MARGIN_L, y, line)
         y -= LINE
 
-    # ===== bloco da assinatura (compatível Blob/Local) =====
+    # Bloco da assinatura
     sig_w = min(CONTENT_W, 460)
     sig_h = 0
     sig_abs = contract_signature_abs_path(contract)
@@ -840,8 +1052,8 @@ def _generate_contract_pdf(contract) -> str | None:
     meta_lines = 2 + (1 if contract.signed_at else 0) + (1 if contract.signer_ip else 0)
     needed = 20 + (meta_lines * LINE) + (sig_h or 110) + 10
     if y - needed < MARGIN_B:
-        c.showPage()
-        y = header(c, "")
+        footer(c); c.showPage()
+        y = header(c, "4UIT Solutions — MSA (cont.)")
 
     c.setFont("Helvetica-Bold", 12)
     c.drawString(MARGIN_L, y, "Signature")
@@ -871,8 +1083,18 @@ def _generate_contract_pdf(contract) -> str | None:
         except Exception:
             pass
 
+    # Rodapé final da última página
+    footer(c)
     c.save()
     return abs_path
+
+
+def _safe_generate_contract_pdf(contract):
+    """Gera o PDF do contrato e captura qualquer falha sem derrubar a view."""
+    try:
+        return _generate_contract_pdf(contract)
+    except Exception:
+        return None
 
 
 def _generate_access_request_pdf(ar: "AccessRequest") -> str:
@@ -886,8 +1108,32 @@ def _generate_access_request_pdf(ar: "AccessRequest") -> str:
     LINE = 14
     CONTENT_W = PAGE_W - MARGIN_L - MARGIN_R
 
-    y = _header_pdf(c, "4UIT Solutions — Access Information")
+    def page_header(title="4UIT Solutions — Access Information"):
+        return _header_pdf(c, title)
 
+    def page_break(title="4UIT Solutions — Access Information (cont.)"):
+        _footer_pdf(c)
+        c.showPage()
+        return _header_pdf(c, title)
+
+    def wrap(text: str, font="Helvetica", size=10):
+        from reportlab.pdfbase.pdfmetrics import stringWidth
+        out = []
+        for raw in (text or "").replace("\r\n", "\n").split("\n"):
+            words, cur = raw.split(" "), ""
+            for w in words:
+                test = (cur + " " + w).strip()
+                if stringWidth(test, font, size) <= CONTENT_W:
+                    cur = test
+                else:
+                    if cur: out.append(cur)
+                    cur = w
+            out.append(cur)
+        return out
+
+    y = page_header()
+
+    # ===== Cabeçalho de auditoria
     c.setFont("Helvetica", 10)
     client_name = "-"
     if getattr(ar, "client", None):
@@ -904,28 +1150,19 @@ def _generate_access_request_pdf(ar: "AccessRequest") -> str:
         audit.append(f"IP: {ar.signer_ip}")
 
     for line in audit:
+        if y - LINE < MARGIN_B:
+            y = page_break()
+            c.setFont("Helvetica", 10)
         c.drawString(MARGIN_L, y, line); y -= LINE
 
+    # ===== Detalhes
     y -= 6
     c.setFont("Helvetica-Bold", 11)
+    if y - LINE < MARGIN_B:
+        y = page_break()
     c.drawString(MARGIN_L, y, "Access details")
     y -= LINE
     c.setFont("Helvetica", 10)
-
-    def wrap(text, font="Helvetica", size=10):
-        from reportlab.pdfbase.pdfmetrics import stringWidth
-        out = []
-        for raw in (text or "").replace("\r\n", "\n").split("\n"):
-            words, cur = raw.split(" "), ""
-            for w in words:
-                test = (cur + " " + w).strip()
-                if stringWidth(test, font, size) <= CONTENT_W:
-                    cur = test
-                else:
-                    if cur: out.append(cur)
-                    cur = w
-            out.append(cur)
-        return out
 
     pairs = [
         ("Instagram (user)", ar.instagram_user),
@@ -947,17 +1184,16 @@ def _generate_access_request_pdf(ar: "AccessRequest") -> str:
         txt = f"{label}: {value or '-'}"
         lines = wrap(txt, size=10)
         for ln in lines:
-            if y <= MARGIN_B + 220:
-                c.showPage(); y = PAGE_H - 72
-                c.setFont("Helvetica-Bold", 12)
-                c.drawString(MARGIN_L, y, "Access Information (cont.)")
-                y -= 18
+            if y - LINE < MARGIN_B:
+                y = page_break()
                 c.setFont("Helvetica", 10)
-            c.drawString(MARGIN_L, y, ln)
-            y -= LINE
+            c.drawString(MARGIN_L, y, ln); y -= LINE
         y -= 2
 
+    # ===== Assinatura
     c.setFont("Helvetica-Bold", 12)
+    if y - (LINE*2 + 120) < MARGIN_B:
+        y = page_break()
     c.drawString(MARGIN_L, y, "Signature")
     y -= 18
 
@@ -970,7 +1206,8 @@ def _generate_access_request_pdf(ar: "AccessRequest") -> str:
 
     if ar.signature_path:
         try:
-            sig_abs = os.path.join(BASE_DIR, ar.signature_path.replace("/", os.sep))
+            sig_rel = ar.signature_path.replace("\\", "/")
+            sig_abs = os.path.join(UPLOAD_ROOT, sig_rel.replace("uploads/", ""))
             if os.path.exists(sig_abs):
                 sig_use = normalize_signature_png(sig_abs)
                 from PIL import Image as _PILImage
@@ -979,7 +1216,8 @@ def _generate_access_request_pdf(ar: "AccessRequest") -> str:
                 scale = max_w / float(iw)
                 sig_w = max_w
                 sig_h = int(ih * scale)
-
+                if y - sig_h < MARGIN_B:
+                    y = page_break()
                 img = ImageReader(sig_use)
                 c.drawImage(img, MARGIN_L, y - sig_h, width=sig_w, height=sig_h,
                             preserveAspectRatio=True, anchor='nw')
@@ -987,17 +1225,9 @@ def _generate_access_request_pdf(ar: "AccessRequest") -> str:
         except Exception:
             pass
 
+    _footer_pdf(c)
     c.save()
     return abs_path
-
-
-def _safe_generate_contract_pdf(contract):
-    try:
-        return _generate_contract_pdf(contract)
-    except NameError:
-        return None
-    except Exception:
-        return None
 
 
 # Jinja filter: highlight
@@ -1033,15 +1263,24 @@ def admin_assets_ensure_tokens():
     db.session.commit()
     return jsonify({"ok": True, "updated": len(missing)})
 
-# ===== UPLOAD ROOT =====
-UPLOAD_ROOT = os.path.join(app.root_path, "uploads")
 
-# Rota única para servir arquivos de uploads/ com segurança
-@app.get("/uploads/<path:filename>")
-def uploads(filename):
-    uploads_root = os.path.join(app.root_path, "uploads")
-    return send_from_directory(uploads_root, filename)
-
+def _abs_from_rel_upload(rel_path: str | None) -> str | None:
+    """
+    Resolve um caminho absoluto a partir de um caminho relativo tipo 'uploads/...'
+    tentando as raízes conhecidas.
+    """
+    if not rel_path:
+        return None
+    rel = rel_path.lstrip("/").replace("\\", "/")
+    # Prioridade: UPLOAD_ROOT (persistente)
+    cand1 = os.path.join(UPLOAD_ROOT, rel.replace("uploads/", ""))
+    if os.path.exists(cand1):
+        return cand1
+    # Fallback: BASE_DIR
+    cand2 = os.path.join(BASE_DIR, rel)
+    if os.path.exists(cand2):
+        return cand2
+    return cand1  # ainda retorna o esperado na raiz persistente
 
 
 # -------------------------------------------------
@@ -1135,6 +1374,29 @@ def logout():
     flash("Signed out.", "info")
     return redirect(url_for("login"))
 
+# --- Rotas locais para servir assets (dev / ambiente sem CDN) ---
+from flask import send_from_directory, abort
+
+# /uploads/assets/<arquivo>
+@app.route("/uploads/assets/<path:filename>")
+def serve_asset_file(filename):
+    return send_from_directory(UPLOAD_ASSETS_DIR, filename, as_attachment=False, max_age=3600)
+
+# /uploads/assets/thumbs/<arquivo>
+@app.route("/uploads/assets/thumbs/<path:filename>")
+def serve_asset_thumb(filename):
+    return send_from_directory(UPLOAD_ASSETS_THUMBS_DIR, filename, as_attachment=False, max_age=3600)
+
+# (Opcional) genérica para qualquer coisa em /uploads
+@app.route("/uploads/<path:path>")
+def serve_asset_generic(path):
+    abspath = os.path.join(UPLOAD_ROOT, path)
+    if not os.path.abspath(abspath).startswith(os.path.abspath(UPLOAD_ROOT)):
+        abort(404)
+    directory, fname = os.path.split(abspath)
+    if not os.path.exists(abspath):
+        abort(404)
+    return send_from_directory(directory, fname, as_attachment=False, max_age=3600)
 
 # -------------------------------------------------
 # APIs
@@ -1210,7 +1472,7 @@ def api_signature():
         try:
             contract.signature_blob = sig_info["blob_name"]
         except Exception:
-            pass  # se o modelo ainda não tem a coluna, ignora
+            pass
     if sig_info["local_relpath"]:
         contract.signature_path = sig_info["local_relpath"]
 
@@ -1423,13 +1685,11 @@ def api_access_request():
         return jsonify(ok=False, error=str(e)), 400
 
 
-from sqlalchemy.orm import joinedload
-
 @app.get("/admin/access/<int:ar_id>")
 @login_required
 def admin_access_view(ar_id):
     ar = AccessRequest.query.options(joinedload(AccessRequest.client)).get_or_404(ar_id)
-    return render_template("/access_view.html", ar=ar)
+    return render_template("access_view.html", ar=ar)
 
 @app.get("/admin/access/<int:ar_id>/pdf")
 @login_required
@@ -1696,6 +1956,7 @@ def assets_send_review_email(asset_id: int):
         ensure_public_token(asset)
         db.session.commit()
     review_url = url_for("public_review", token=asset.public_token, _external=True)
+
     storage_url = f"{request.host_url.rstrip('/')}/{asset.storage_path}" if asset.storage_path else None
 
     subject = f"[Review] {asset.title} — {client.company_name if client else '4UIT Client'}"
@@ -1755,8 +2016,8 @@ Thanks,
     attachments = []
     attach_flag = (request.form.get("attach") == "1")
     if attach_flag and asset.storage_path:
-        abs_path = os.path.join(BASE_DIR, asset.storage_path.replace("/", os.sep))
-        if os.path.exists(abs_path):
+        abs_path = _abs_from_rel_upload(asset.storage_path)
+        if abs_path and os.path.exists(abs_path):
             attachments.append((abs_path, os.path.basename(abs_path)))
 
     try:
@@ -1776,6 +2037,8 @@ Thanks,
 
     return redirect(url_for("asset_detail", asset_id=asset.id))
 
+
+from io import BytesIO
 
 @app.route("/assets/upload", methods=["GET", "POST"])
 @admin_required
@@ -1801,19 +2064,50 @@ def asset_upload():
                 return redirect(url_for("asset_upload"))
 
             newname = f"{uuid.uuid4().hex}.{ext}"
-            storage_rel = os.path.join("uploads", "assets", newname)
-            storage_abs = os.path.join(BASE_DIR, storage_rel)
-            f.save(storage_abs)
-            file_mime = f.mimetype
-            try:
-                file_size = pathlib.Path(storage_abs).stat().st_size
-            except Exception:
-                file_size = None
+            rel_main = os.path.join("assets", newname).replace("\\", "/")
 
-            if _is_image(file_mime, ext):
-                thumb_rel = os.path.join("uploads", "assets", "thumbs", f"{uuid.uuid4().hex}.jpg")
-                thumb_abs = os.path.join(BASE_DIR, thumb_rel)
-                _gen_thumb(storage_abs, thumb_abs)
+            # lê em memória para suportar Blob e Local
+            raw = f.read()
+            file_size = len(raw) if raw is not None else None
+            file_mime = f.mimetype or _guess_mime(newname)
+
+            # salva principal (Blob ou Local)
+            storage_path = _store_file(raw, rel_main, content_type=file_mime)
+            storage_rel = storage_path  # 'blob:assets/...' ou 'uploads/assets/...'
+
+            # Miniatura somente para imagens
+            if _is_image(file_mime, ext) and PIL_AVAILABLE:
+                try:
+                    from PIL import Image as _IM
+                    im = _IM.open(BytesIO(raw))
+
+                    # normaliza modo
+                    if im.mode == "P":
+                        try:
+                            im = im.convert("RGBA")
+                        except Exception:
+                            im = im.convert("RGB")
+                    elif im.mode not in ("RGB", "RGBA"):
+                        im = im.convert("RGBA" if "A" in im.getbands() else "RGB")
+
+                    im.thumbnail((480, 480))
+
+                    # garante JPEG (remove alpha se houver)
+                    buf = BytesIO()
+                    if im.mode == "RGBA":
+                        from PIL import Image as _PILImage
+                        bg = _PILImage.new("RGB", im.size, (255, 255, 255))
+                        bg.paste(im, mask=im.split()[3])
+                        im = bg
+                    im.save(buf, "JPEG", quality=82)
+                    buf.seek(0)
+
+                    thumb_name = f"{uuid.uuid4().hex}.jpg"
+                    rel_thumb = os.path.join("assets", "thumbs", thumb_name).replace("\\", "/")
+                    thumb_path = _store_file(buf.getvalue(), rel_thumb, content_type="image/jpeg")
+                    thumb_rel = thumb_path  # 'blob:assets/thumbs/...' ou 'uploads/assets/thumbs/...'
+                except Exception as e:
+                    app.logger.warning("thumbnail generation failed: %s", e)
 
         if not client_id or not title:
             flash("Client and title are required.", "danger")
@@ -1843,7 +2137,10 @@ def asset_upload():
             if sent is not False:
                 app.logger.info("Client review email queued/sent for asset #%s", asset.id)
             else:
-                app.logger.warning("notify_client_asset_needs_review returned False (no recipient?) for asset #%s", asset.id)
+                app.logger.warning(
+                    "notify_client_asset_needs_review returned False (no recipient?) for asset #%s",
+                    asset.id
+                )
         except Exception as e:
             app.logger.exception("Failed to send client review email for asset #%s: %s", asset.id, e)
             flash("Asset uploaded, but failed to send client notification email. Check SMTP/env and logs.", "warning")
@@ -1892,6 +2189,151 @@ def assets_mark_posted(asset_id: int):
     db.session.commit()
     flash("Asset marked as 'posted'.", "success")
     return redirect(url_for("assets_list", **request.args))
+
+
+# === Editar Asset ======================================================
+@app.route("/assets/<int:asset_id>/edit", methods=["GET", "POST"])
+@admin_required
+def asset_edit(asset_id):
+    a = Asset.query.get_or_404(asset_id)
+    clients = Client.query.order_by(Client.company_name.asc()).all()
+
+    if request.method == "POST":
+        client_id = request.form.get("client_id", type=int)
+        title = (request.form.get("title") or "").strip()
+        description = request.form.get("description")
+        kind = (request.form.get("kind") or "image").strip().lower()
+        external_url = (request.form.get("external_url") or "").strip()
+        status = (request.form.get("status") or a.status or "pending").strip().lower()
+
+        if not client_id or not title:
+            flash("Client and title are required.", "danger")
+            return redirect(url_for("asset_edit", asset_id=a.id))
+
+        # Atualiza campos básicos
+        a.client_id = client_id
+        a.title = title
+        a.description = description
+        a.kind = kind
+        a.external_url = external_url
+        a.status = status
+        a.updated_at = utcnow()
+
+        # Substituição de arquivo (opcional)
+        f = request.files.get("file")
+        if f and f.filename:
+            ext = (f.filename.rsplit(".", 1)[-1] or "").lower()
+            if ext not in ALLOWED_EXTS:
+                flash("File type not allowed.", "danger")
+                return redirect(url_for("asset_edit", asset_id=a.id))
+
+            # Apaga arquivos antigos, se existirem
+            if a.storage_path:
+                _delete_storage_file(a.storage_path)
+            if a.thumbnail_path:
+                _delete_storage_file(a.thumbnail_path)
+
+            # Salva novo arquivo (modo local). Para Azure, aqui podemos enviar ao Blob.
+            newname = f"{uuid.uuid4().hex}.{ext}"
+            storage_rel = os.path.join("uploads", "assets", newname)
+            storage_abs = os.path.join(UPLOAD_ASSETS_DIR, newname)
+
+            if _storage_is_azure():
+                # Upload para Azure Blob
+                from azure.storage.blob import ContentSettings
+                bsc = _azure_blob_client()
+                container = _blob_container_name()
+                blob_name = _blob_name_from_rel(storage_rel)
+                content = f.read()
+                bsc.get_container_client(container).upload_blob(
+                    name=blob_name,
+                    data=content,
+                    overwrite=True,
+                    content_settings=ContentSettings(content_type=f.mimetype or "application/octet-stream"),
+                )
+            else:
+                f.save(storage_abs)
+
+            a.storage_path = storage_rel
+            a.file_mime = getattr(f, "mimetype", None)
+            try:
+                if _storage_is_azure():
+                    a.file_size = len(content)
+                else:
+                    a.file_size = pathlib.Path(storage_abs).stat().st_size
+            except Exception:
+                a.file_size = None
+
+            # Gera thumbnail (apenas se imagem e em modo local; para Azure, gere thumb local e suba)
+            a.thumbnail_path = None
+            if _is_image(a.file_mime, ext):
+                thumb_name = f"{uuid.uuid4().hex}.jpg"
+                thumb_rel = os.path.join("uploads", "assets", "thumbs", thumb_name)
+                thumb_abs = os.path.join(UPLOAD_ASSETS_THUMBS_DIR, thumb_name)
+
+                if _storage_is_azure():
+                    # baixa temporário, gera thumb e reenvia
+                    tmp_abs = storage_abs if not _storage_is_azure() else os.path.join(BASE_DIR, "tmp_" + newname)
+                    if _storage_is_azure():
+                        # baixa o blob recém enviado para gerar thumb
+                        bsc = _azure_blob_client()
+                        container = _blob_container_name()
+                        blob_name = _blob_name_from_rel(storage_rel)
+                        with open(tmp_abs, "wb") as wf:
+                            stream = bsc.get_container_client(container).download_blob(blob_name)
+                            wf.write(stream.readall())
+                    _gen_thumb(tmp_abs, thumb_abs)
+                    # envia thumb ao Azure
+                    from azure.storage.blob import ContentSettings
+                    bsc = _azure_blob_client()
+                    container = _blob_container_name()
+                    bsc.get_container_client(container).upload_blob(
+                        name=_blob_name_from_rel(thumb_rel),
+                        data=open(thumb_abs, "rb"),
+                        overwrite=True,
+                        content_settings=ContentSettings(content_type="image/jpeg"),
+                    )
+                    # limpa temporários locais se quiser
+                    try:
+                        if _storage_is_azure() and os.path.exists(tmp_abs):
+                            os.remove(tmp_abs)
+                        if os.path.exists(thumb_abs):
+                            os.remove(thumb_abs)
+                    except Exception:
+                        pass
+                else:
+                    _gen_thumb(storage_abs, thumb_abs)
+
+                a.thumbnail_path = thumb_rel
+
+        db.session.commit()
+        flash("Asset updated.", "success")
+        return redirect(url_for("asset_detail", asset_id=a.id))
+
+    return render_template("asset_edit.html", a=a, clients=clients)
+
+# === Excluir Asset ======================================================
+@app.route("/assets/<int:asset_id>/delete", methods=["POST"])
+@admin_required
+def asset_delete(asset_id):
+    a = Asset.query.get_or_404(asset_id)
+
+    try:
+        # Remove arquivos do storage (se existirem)
+        if a.storage_path:
+            _delete_storage_file(a.storage_path)
+        if a.thumbnail_path:
+            _delete_storage_file(a.thumbnail_path)
+
+        db.session.delete(a)
+        db.session.commit()
+        flash(f"Asset #{asset_id} deleted.", "success")
+    except Exception as e:
+        db.session.rollback()
+        app.logger.exception("Erro ao excluir asset #%s: %s", asset_id, e)
+        flash("Failed to delete asset.", "danger")
+
+    return redirect(url_for("assets_list"))
 
 
 # -------------------------------------------------
@@ -2096,12 +2538,22 @@ def admin_home():
 def admin_contract_view(contract_id):
     contract = Contract.query.get_or_404(contract_id)
     client = Client.query.get(contract.client_id)
+
     signature_url = None
-    if contract.signature_path:
-        # serve /uploads/<path> SEM usar flask.safe_join
-        signature_url = url_for("uploads", filename=contract.signature_path)
+
+    # 1) Se tiver caminho local salvo
+    if getattr(contract, "signature_path", None):
+        signature_url = "/" + contract.signature_path.lstrip("/")
+
+    # 2) Se tiver blob e Azure configurado, gerar SAS
+    if not signature_url and getattr(contract, "signature_blob", None) and blob_service and container_client:
+        try:
+            signature_url = make_sas_url(contract.signature_blob, minutes=30)
+        except Exception:
+            signature_url = None
+
     return render_template(
-        "admin/contract_view.html",
+        "contract_view.html",
         contract=contract, client=client, signature_url=signature_url
     )
 
@@ -2128,18 +2580,35 @@ def admin_contract_pdf(contract_id: int):
 # -------------------------------------------------
 @app.get("/uploads/signatures/<path:filename>")
 def get_signature(filename):
-    # compat: servir da pasta persistente
-    abs_dir = UPLOAD_SIGS_DIR
-    return send_from_directory(abs_dir, filename)
+    """
+    Serve assinaturas procurando em múltiplas raízes:
+    - UPLOAD_SIGS_DIR (persistente)
+    - BASE_DIR/uploads/signatures (legado)
+    - BASE_DIR/uploads (se o caminho veio completo "uploads/signatures/...")
+    """
+    candidates = []
 
+    # 1) Persistente
+    candidates.append(os.path.join(UPLOAD_SIGS_DIR, filename))
 
-@app.get("/uploads/assets/<path:filename>")
-def get_asset_file(filename):
-    folder = UPLOAD_ASSETS_DIR
-    if filename.startswith("thumbs/"):
-        folder = UPLOAD_ASSETS_THUMBS_DIR
-        filename = filename.split("thumbs/", 1)[1]
-    return send_from_directory(folder, filename)
+    # 2) Legado (BASE_DIR/uploads/signatures)
+    legacy_dir = os.path.join(BASE_DIR, "uploads", "signatures")
+    candidates.append(os.path.join(legacy_dir, filename))
+
+    # 3) Caso o filename já venha com "uploads/signatures/..."
+    if filename.startswith("uploads/"):
+        candidates.append(os.path.join(BASE_DIR, filename))
+        # e também tentar relativo à raiz persistente
+        candidates.append(os.path.join(UPLOAD_ROOT, filename.replace("uploads/", "")))
+
+    for cand in candidates:
+        if os.path.isfile(cand):
+            # devolver do diretório em que achamos
+            return send_file(cand)
+
+    # não achou: 404
+    abort(404)
+
 
 
 # ============================
@@ -2148,8 +2617,8 @@ def get_asset_file(filename):
 @app.get("/review/<token>")
 def public_review(token):
     asset = Asset.query.filter_by(public_token=token).first_or_404()
-    storage_url = f"/{asset.storage_path}" if asset.storage_path else None
-    thumb_url = f"/{asset.thumbnail_path}" if asset.thumbnail_path else None
+    storage_url = _public_url(asset.storage_path)
+    thumb_url   = _public_url(asset.thumbnail_path)
     external_url = asset.external_url
 
     return render_template(
@@ -2428,45 +2897,37 @@ def _client_for_user(user: User):
 @app.get("/portal/contracts")
 @login_required
 def portal_contracts():
-    try:
-        client = _portal_find_client_for_user()
+    client = _portal_find_client_for_user()
 
-        contracts = []
-        access_rows = []
-        access_last = None
+    contracts = []
+    access_rows = []
+    access_last = None
 
-        # link do botão "Fill/Update"
-        access_prefill = url_for("portal_access")
+    if client:
+        contracts = (Contract.query
+                     .filter_by(client_id=client.id)
+                     .order_by(Contract.id.asc())
+                     .all())
 
-        if client:
-            contracts = (Contract.query
-                         .options(joinedload(Contract.client))
-                         .filter_by(client_id=client.id)
-                         .order_by(Contract.signed_at.desc())
-                         .all())
+        access_rows = (AccessRequest.query
+                       .filter_by(client_id=client.id)
+                       .order_by(AccessRequest.id.asc())
+                       .all())
 
-            access_rows = (AccessRequest.query
-                           .filter_by(client_id=client.id)
-                           .order_by(AccessRequest.submitted_at.desc())
-                           .all())
-            access_last = access_rows[0] if access_rows else None
+        access_last = access_rows[-1] if access_rows else None
 
-        return render_template(
-            "portal_contracts.html",
-            client=client,
-            contracts=contracts,
-            access_rows=access_rows,
-            access_last=access_last,
-            access_prefill=access_prefill,
-        )
-    except Exception:
-        app.logger.exception("portal_contracts failed")
-        # não deixa cair 500
-        return render_template(
-            "portal_contracts.html",
-            client=None, contracts=[], access_rows=[], access_last=None,
-            access_prefill=url_for("portal_access"),
-        ), 200
+    # destino do botão "Fill my access info" -> rota existente do portal
+    access_prefill = url_for("portal_access")
+
+    return render_template(
+        "portal_contracts.html",
+        client=client,
+        contracts=contracts,
+        access_rows=access_rows,
+        access_last=access_last,
+        access_prefill=access_prefill,
+    )
+
 
 
 @app.get("/portal/contract/<int:contract_id>/pdf")
@@ -2475,17 +2936,21 @@ def portal_contract_pdf(contract_id):
     contract = Contract.query.get_or_404(contract_id)
     client = Client.query.get_or_404(contract.client_id)
 
-    # **autorização básica**: o usuário do portal precisa pertencer a este client
+    # autorização básica: o usuário do portal precisa pertencer a este client
     my_client = _portal_find_client_for_user()
     if not my_client or my_client.id != client.id:
         abort(403)
 
-    # use sua função geradora já usada no Admin
-    pdf_bytes = generate_contract_pdf(contract, client)  # mantém sua função existente
-    return send_file(io.BytesIO(pdf_bytes),
-                     mimetype="application/pdf",
-                     as_attachment=False,
-                     download_name=f"contract_{contract.id}.pdf")
+    # Gera (se preciso) e devolve o PDF existente (mesmo gerador do Admin)
+    pdf_abs = _safe_generate_contract_pdf(contract)
+    if not (pdf_abs and os.path.exists(pdf_abs)):
+        abort(404)
+    return send_file(
+    pdf_abs,
+    mimetype="application/pdf",
+    as_attachment=True,
+    download_name=f"contract_{contract.id}.pdf",
+)
 
 
 # ======================
@@ -2494,30 +2959,28 @@ def portal_contract_pdf(contract_id):
 @app.get("/portal/access")
 @login_required
 def portal_access():
+    # encontrar o client do usuário logado
     client = _portal_find_client_for_user()
     if not client:
         flash("We couldn't link your user to a client. Please contact support.", "warning")
         return redirect(url_for("portal_contracts"))
 
-    # últimos envios para mostrar contexto no topo do form (opcional)
+    # (opcional) últimos envios só para contexto, caso seu template use
     access_rows = (AccessRequest.query
                    .filter_by(client_id=client.id)
                    .order_by(AccessRequest.submitted_at.desc())
                    .all())
     access_last = access_rows[0] if access_rows else None
 
-    # tenta abrir seu form dedicado, senão mostra um fallback simples
-    try:
-        return render_template("portal_access_form.html",
-                               client=client,
-                               access_last=access_last,
-                               access_rows=access_rows)
-    except TemplateNotFound:
-        return render_template("portal_access.html",
-                               client=client,
-                               access_last=access_last,
-                               access_rows=access_rows)
-
+    # renderiza o MESMO template já usado na rota pública
+    # mantendo as mesmas variáveis esperadas pelo access_request.html
+    return render_template(
+        "access_request.html",
+        prefill_company=(client.company_name or ""),
+        prefill_email=(getattr(current_user, "email", None) or client.contact_email or ""),
+        access_last=access_last,
+        access_rows=access_rows,
+    )
 
 
 # --------------- ROTA: Portal (cliente) baixar PDF do Access ----------------
@@ -2526,73 +2989,22 @@ def portal_access():
 def portal_access_pdf(access_id):
     # autorização: usuário logado precisa pertencer ao mesmo Client do AccessRequest
     ar = AccessRequest.query.get_or_404(access_id)
-
-    # tenta vincular o usuário ao Client (usa o helper já sugerido)
     my_client = _portal_find_client_for_user()
     if not my_client or my_client.id != ar.client_id:
         abort(403)
 
-    # ======= A PARTIR DAQUI É O SEU CÓDIGO ORIGINAL =======
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.pagesizes import A4
-    from io import BytesIO
-    import os
+    # Reaproveita o mesmo gerador padronizado do admin
+    abs_path = _access_request_pdf_path(ar.id)
+    if not os.path.exists(abs_path):
+        _generate_access_request_pdf(ar)
 
-    buf = BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
-    w, h = A4
-    y = h - 50
-
-    def line(txt=""):
-        nonlocal y
-        c.drawString(40, y, str(txt) if txt is not None else "")
-        y -= 18
-
-    c.setTitle(f"AccessRequest-{access_id}")
-    c.setFont("Helvetica-Bold", 14); line("Access Information (Ads / Analytics / Domain / Hosting)")
-    c.setFont("Helvetica", 11); y -= 8
-
-    # bloco 1 — ids e contas
-    line(f"Client ID: {ar.client_id}")
-    line(f"Instagram: {ar.instagram_user or '-'}")
-    line(f"Facebook Page: {ar.facebook_page or '-'}")
-    line(f"Meta BM ID: {ar.meta_bm_id or '-'}")
-    line(f"Meta Ads Account ID: {ar.meta_ads_account_id or '-'}")
-    line(f"Google Ads ID: {ar.google_ads_id or '-'}")
-
-    # bloco 2 — website/hosting/domain
-    y -= 8
-    line(f"Website: {ar.website_url or '-'}")
-    line(f"Hosting: {ar.hosting or '-'}")
-    line(f"Domain Registrar: {ar.domain_registrar or '-'}")
-
-    # bloco 3 — submissão/assinatura
-    y -= 8
-    line(f"Submitted at (UTC): {ar.submitted_at}")
-    line(f"Signer: {ar.signer_name or '-'}  <{ar.signer_email or '-'}>")
-    line(f"IP: {ar.signer_ip or '-'}")
-
-    # assinatura, se houver arquivo salvo
-    if ar.signature_path:
-        try:
-            sig_path = safe_join(UPLOAD_ROOT, ar.signature_path)  # <- seguro
-            if sig_path and os.path.isfile(sig_path):
-                img_w, img_h = 260, 80
-                c.drawImage(sig_path, 40, max(60, y - img_h - 10),
-                            width=img_w, height=img_h,
-                            preserveAspectRatio=True, mask='auto')
-        except Exception:
-            pass
-
-    c.showPage()
-    c.save()
-    buf.seek(0)
     return send_file(
-        buf,
+        abs_path,
         mimetype="application/pdf",
         download_name=f"access-{access_id}.pdf",
-        as_attachment=True  # mantém "Download PDF" como arquivo
+        as_attachment=True
     )
+
 
 
 # ======================

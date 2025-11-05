@@ -75,10 +75,19 @@
             {% else %}
               <span class="muted">no token</span>
             {% endif %}
+
             <a class="btn btn-ghost" href="{{ url_for('asset_detail', asset_id=x.id) }}">Details</a>
-            {% if x.storage_path %}
-              <a class="btn btn-ghost" href="/{{ x.storage_path }}" target="_blank" rel="noopener">Open file</a>
+            <a class="btn btn-ghost" href="{{ url_for('asset_edit', asset_id=x.id) }}">Edit</a>
+
+            <form method="post" action="{{ url_for('asset_delete', asset_id=x.id) }}" style="display:inline" onsubmit="return confirm('Delete this asset? This cannot be undone.');">
+              <button class="btn btn-danger" type="submit">Delete</button>
+            </form>
+
+            {% set open_url = asset_public_url(x) %}
+            {% if open_url %}
+              <a class="btn btn-ghost" href="{{ open_url }}" target="_blank" rel="noopener">Open file</a>
             {% endif %}
+
             {% if x.status != 'posted' %}
               <form method="post" action="{{ url_for('assets_mark_posted', asset_id=x.id) }}" style="display:inline">
                 <button class="btn" type="submit">Mark as posted</button>

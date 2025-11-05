@@ -1,11 +1,11 @@
-﻿{% extends "portal_base.html" %}
-{% set title = "Assets â€” 4UIT" %}
+{% extends "portal_base.html" %}
+{% set title = "Assets — 4UIT" %}
 {% set heading = "My Assets" %}
 {% set subheading = "Review, comment and approve your creatives" %}
 
 {% block content %}
 <div class="card" style="margin-bottom:12px">
-  <div class="muted">Below are creatives our team shared with you. Click â€œReviewâ€ to approve or request changes.</div>
+  <div class="muted">Below are creatives our team shared with you. Click “Review” to approve or request changes.</div>
 </div>
 
 <div class="card" style="padding:0">
@@ -24,13 +24,13 @@
         {% for a in assets %}
           <tr>
             <td>{{ a.id }}</td>
-            <td>{{ a.title or a.filename or 'â€”' }}</td>
+            <td>{{ a.title or a.filename or '—' }}</td>
             <td>{{ a.status or 'pending' }}</td>
-            <td>{{ a.created_at.isoformat() if a.created_at else 'â€”' }}</td>
+            <td>{{ a.created_at.isoformat() if a.created_at else '—' }}</td>
             <td style="white-space:nowrap">
               <a class="btn" href="{{ url_for('portal_asset_review', asset_id=a.id) }}">Review</a>
               {% if a.storage_path %}
-                <a class="btn btn-ghost" href="{{ public_url(a.storage_path) }}" target="_blank">Download</a>
+                <a class="btn btn-ghost" href="/{{ a.storage_path }}" target="_blank">Download</a>
               {% endif %}
             </td>
           </tr>
@@ -43,4 +43,3 @@
   </div>
 </div>
 {% endblock %}
-

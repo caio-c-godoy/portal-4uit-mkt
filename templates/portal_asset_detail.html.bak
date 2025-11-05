@@ -1,5 +1,5 @@
-﻿{% extends "portal_base.html" %}
-{% block title %}Portal do Cliente â€” Detalhe da Arte{% endblock %}
+{% extends "portal_base.html" %}
+{% block title %}Portal do Cliente — Detalhe da Arte{% endblock %}
 
 {% block extra_head %}
 <style>
@@ -40,7 +40,7 @@
 {% endblock %}
 
 {% set heading = "Detalhe da Arte" %}
-{% set subheading = "Visualize e aprove/reprove com comentÃ¡rio." %}
+{% set subheading = "Visualize e aprove/reprove com comentário." %}
 
 {% block content %}
 <div class="wrap">
@@ -67,14 +67,14 @@
 
     <div class="small" style="margin-top:8px">
       ID #{{ a.id }}
-      â€¢ Criado: {{ a.created_at.strftime('%Y-%m-%d %H:%M') if a.created_at else '-' }}
-      {% if a.scheduled_for %} â€¢ Agendado (UTC): {{ a.scheduled_for.isoformat() }}{% endif %}
+      • Criado: {{ a.created_at.strftime('%Y-%m-%d %H:%M') if a.created_at else '-' }}
+      {% if a.scheduled_for %} • Agendado (UTC): {{ a.scheduled_for.isoformat() }}{% endif %}
     </div>
 
     <div class="row" style="margin-top:14px; gap:8px">
-      <a class="btn" href="{{ review_url }}" target="_blank">Abrir PÃ¡gina de RevisÃ£o</a>
+      <a class="btn" href="{{ review_url }}" target="_blank">Abrir Página de Revisão</a>
       {% if a.storage_path %}
-        <a class="btn secondary" href="{{ public_url(a.storage_path) }}" target="_blank">Abrir Arquivo</a>
+        <a class="btn secondary" href="/{{ a.storage_path }}" target="_blank">Abrir Arquivo</a>
       {% endif %}
     </div>
   </section>
@@ -86,18 +86,17 @@
         <button class="btn secondary" name="decision" value="reject" type="submit">Reprovar</button>
       </div>
 
-      <label class="small">ComentÃ¡rio (opcional)</label>
-      <textarea name="comment" placeholder="Deixe um comentÃ¡rio para nossa equipe..."></textarea>
+      <label class="small">Comentário (opcional)</label>
+      <textarea name="comment" placeholder="Deixe um comentário para nossa equipe..."></textarea>
 
-      <label class="small">Agendar publicaÃ§Ã£o (opcional, UTC)</label>
+      <label class="small">Agendar publicação (opcional, UTC)</label>
       <input type="datetime-local" name="scheduled_for"/>
 
       <div class="small">
-        Dica: vocÃª tambÃ©m pode abrir a <a href="{{ review_url }}" target="_blank">PÃ¡gina de RevisÃ£o</a>
-        e enviar sua decisÃ£o por lÃ¡.
+        Dica: você também pode abrir a <a href="{{ review_url }}" target="_blank">Página de Revisão</a>
+        e enviar sua decisão por lá.
       </div>
     </form>
   </aside>
 </div>
 {% endblock %}
-

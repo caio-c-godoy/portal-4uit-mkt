@@ -1,11 +1,11 @@
-﻿{% extends "base.html" %}
-{% set title = "Asset Detail â€” 4UIT" %}
+{% extends "base.html" %}
+{% set title = "Asset Detail — 4UIT" %}
 {% set heading = "Asset detail" %}
 {% set subheading = a.title %}
 
 {% block content %}
-{# Gera URL pÃºblica (local ou Azure) para o preview #}
-{% set preview_url = public_url(a.thumbnail_path) or public_url(a.storage_path) %}
+{# Gera URL pública (local ou Azure) para o preview #}
+{% set preview_url = asset_public_url(a) %}
 
 <div class="card">
   <div class="grid" style="grid-template-columns:1fr 1fr;gap:12px">
@@ -14,7 +14,7 @@
       <div>{{ a.client.company_name if a.client else '-' }}</div>
 
       <div class="muted" style="margin-top:8px">Kind / Status</div>
-      <div>{{ a.kind }} â€¢ <span class="pill">{{ a.status }}</span></div>
+      <div>{{ a.kind }} • <span class="pill">{{ a.status }}</span></div>
 
       {% if a.description %}
       <div class="muted" style="margin-top:8px">Description</div>
@@ -77,4 +77,3 @@
   </form>
 </div>
 {% endblock %}
-

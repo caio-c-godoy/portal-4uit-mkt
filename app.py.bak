@@ -1,4 +1,4 @@
-﻿import os, base64, uuid, mimetypes, pathlib, secrets, smtplib
+import os, base64, uuid, mimetypes, pathlib, secrets, smtplib
 from datetime import datetime, timezone, timedelta
 from functools import wraps
 from email.message import EmailMessage
@@ -57,7 +57,7 @@ except Exception:
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
 # -------------------------------------------------
-# Azure Blob â€“ configuraÃ§Ã£o (opcional, com fallback local)
+# Azure Blob – configuração (opcional, com fallback local)
 # -------------------------------------------------
 ACCOUNT = os.environ.get("AZURE_STORAGE_ACCOUNT")  # ex.: "strgportal4uitmkt"
 CONTAINER = os.environ.get("AZURE_BLOB_CONTAINER", "uploads")
@@ -77,20 +77,20 @@ if ACCOUNT:
         except Exception:
             pass
     except Exception:
-        # NÃ£o falhar o app; seguimos com armazenamento local
+        # Não falhar o app; seguimos com armazenamento local
         blob_service = None
         container_client = None
 
 
-# --------- HÃBRIDO: salvar arquivo local OU no Azure e gerar URL pÃºblica ---------
+# --------- HÍBRIDO: salvar arquivo local OU no Azure e gerar URL pública ---------
 USE_BLOB = bool(blob_service and container_client)
 
 def _store_file(bytes_data: bytes, rel_path: str, content_type: str | None = None) -> str:
     """
     Salva o arquivo:
       - Se Azure Blob ativo: sobe em <CONTAINER>/<rel_path> e retorna 'blob:<rel_path>'
-      - SenÃ£o: salva em UPLOAD_ROOT/<rel_path> e retorna 'uploads/<rel_path>'
-    rel_path deve ser relativo Ã  raiz lÃ³gica de uploads (ex.: 'assets/abc.jpg', 'assets/thumbs/abc.jpg').
+      - Senão: salva em UPLOAD_ROOT/<rel_path> e retorna 'uploads/<rel_path>'
+    rel_path deve ser relativo à raiz lógica de uploads (ex.: 'assets/abc.jpg', 'assets/thumbs/abc.jpg').
     """
     rel = rel_path.lstrip("/").replace("\\", "/")
     if USE_BLOB:
@@ -113,9 +113,9 @@ def _store_file(bytes_data: bytes, rel_path: str, content_type: str | None = Non
 def _public_url(ref: str | None, minutes: int = 30) -> str | None:
     """
     Converte o valor armazenado no modelo (ex.: 'blob:assets/xyz.jpg' ou 'uploads/assets/xyz.jpg')
-    em uma URL pÃºblica consumÃ­vel no front.
+    em uma URL pública consumível no front.
 
-    - 'blob:...' -> gera SAS temporÃ¡rio
+    - 'blob:...' -> gera SAS temporário
     - 'uploads/...' -> retorna '/uploads/...'
     - qualquer outro valor -> tenta inferir
     """
@@ -133,7 +133,7 @@ def _public_url(ref: str | None, minutes: int = 30) -> str | None:
             return None
     if ref.startswith("uploads/"):
         return "/" + ref
-    # Fallback: caso jÃ¡ venha sÃ³ 'assets/...'
+    # Fallback: caso já venha só 'assets/...'
     if ref.startswith("assets/"):
         return "/uploads/" + ref
     return "/" + ref
@@ -163,7 +163,7 @@ def _portal_find_client_for_user():
     if ct and ct.client:
         return ct.client
 
-    # 3) Client via AccessRequest.signer_email === user.email (caso ainda nÃ£o tenha contrato)
+    # 3) Client via AccessRequest.signer_email === user.email (caso ainda não tenha contrato)
     ar = (AccessRequest.query
           .options(joinedload(AccessRequest.client))
           .filter(db.func.lower(AccessRequest.signer_email) == user_email)
@@ -178,12 +178,12 @@ def save_dataurl_png_to_blob(data_url: str, folder="signatures") -> str:
     """
     Salva dataURL PNG no Azure Blob (se configurado).
     Retorna o blob_name (ex.: 'signatures/abc.png').
-    LanÃ§a exceÃ§Ã£o se blob nÃ£o estiver disponÃ­vel.
+    Lança exceção se blob não estiver disponível.
     """
     if not (blob_service and container_client):
-        raise RuntimeError("Azure Blob nÃ£o configurado.")
+        raise RuntimeError("Azure Blob não configurado.")
     if not data_url.startswith("data:image/png;base64,"):
-        raise ValueError("Assinatura invÃ¡lida: formato nÃ£o suportado")
+        raise ValueError("Assinatura inválida: formato não suportado")
     b64 = data_url.split(",", 1)[1]
     raw = base64.b64decode(b64)
     blob_name = f"{folder}/{uuid.uuid4().hex}.png"
@@ -194,11 +194,11 @@ def save_dataurl_png_to_blob(data_url: str, folder="signatures") -> str:
 
 def make_sas_url(blob_name: str, minutes: int = 15) -> str:
     """
-    Gera SAS temporÃ¡rio (User Delegation SAS) para leitura.
+    Gera SAS temporário (User Delegation SAS) para leitura.
     Requer blob_service configurado com identidade gerenciada.
     """
     if not blob_service:
-        raise RuntimeError("Azure Blob nÃ£o configurado para SAS.")
+        raise RuntimeError("Azure Blob não configurado para SAS.")
     now = datetime.now(timezone.utc)
     start = now - timedelta(minutes=5)
     expiry = now + timedelta(minutes=minutes)
@@ -283,7 +283,7 @@ app = Flask(
 )
 os.makedirs(app.instance_path, exist_ok=True)
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "dev")
-# DATABASE â€” prioriza Postgres do .env; se nÃ£o houver, cai no SQLite em instance/
+# DATABASE — prioriza Postgres do .env; se não houver, cai no SQLite em instance/
 db_url = (os.getenv("DATABASE_URL") or "").strip()
 
 # Corrige URLs antigas "postgres://..." para o driver atual "postgresql+psycopg://"
@@ -358,14 +358,14 @@ def seed_admin():
 
 def seed_default_contract_template():
     if ContractTemplate.query.count() == 0:
-        default_body = """4UIT SOLUTIONS LLC â€” MASTER SERVICES AGREEMENT (MSA)
-Effective on the date of e-signature below (â€œEffective Dateâ€).
+        default_body = """4UIT SOLUTIONS LLC — MASTER SERVICES AGREEMENT (MSA)
+Effective on the date of e-signature below (“Effective Date”).
 
 1) Parties.
-This Agreement is between 4UIT Solutions LLC (â€œProviderâ€, â€œ4UITâ€) and the client identified in the signature block (â€œClientâ€).
+This Agreement is between 4UIT Solutions LLC (“Provider”, “4UIT”) and the client identified in the signature block (“Client”).
 
 2) Services & Deliverables.
-Provider will perform professional services that may include: marketing strategy, creative/content production, paid media (Google/Meta/TikTok/etc.), landing pages, websites and web/mobile app development, analytics/BI, and related growth services (the â€œServicesâ€). Specific deliverables, timelines, KPIs and add-ons will be detailed in a Statement of Work (â€œSOWâ€).
+Provider will perform professional services that may include: marketing strategy, creative/content production, paid media (Google/Meta/TikTok/etc.), landing pages, websites and web/mobile app development, analytics/BI, and related growth services (the “Services”). Specific deliverables, timelines, KPIs and add-ons will be detailed in a Statement of Work (“SOW”).
 
 3) Term.
 Month-to-month unless stated otherwise in SOW, auto-renewing monthly.
@@ -383,22 +383,22 @@ Approvals via e-mail, portal, or review link authorize posting/scheduling.
 Client owns paid-for work product; 4UIT retains pre-existing tools/libraries with license to Client as embedded.
 
 8) Confidentiality & Data.
-2-year confidentiality (trade secrets while secret). 4UIT aplica prÃ¡ticas razoÃ¡veis de seguranÃ§a.
+2-year confidentiality (trade secrets while secret). 4UIT aplica práticas razoáveis de segurança.
 
 9) Disclaimers.
-Services â€œAS ISâ€; mÃ­dia paga depende de terceiros/mercado.
+Services “AS IS”; mídia paga depende de terceiros/mercado.
 
 10) Liability Cap.
-AtÃ© os fees pagos nos 2 meses anteriores ao claim.
+Até os fees pagos nos 2 meses anteriores ao claim.
 
 11) Termination.
-30 dias por conveniÃªncia; 10 dias para cura em caso de breach.
+30 dias por conveniência; 10 dias para cura em caso de breach.
 
 12) Non-Solicitation.
-12 meses apÃ³s o tÃ©rmino.
+12 meses após o término.
 
 13) Compliance.
-Cliente responsÃ¡vel por regulamentaÃ§Ãµes e polÃ­ticas de anÃºncios.
+Cliente responsável por regulamentações e políticas de anúncios.
 
 14) Governing Law.
 Florida; Orange County.
@@ -417,19 +417,19 @@ with app.app_context():
     seed_default_contract_template()
 
 
-# === Azure base opcional para blobs pÃºblicos ===============================
+# === Azure base opcional para blobs públicos ===============================
 AZURE_BLOB_PUBLIC_BASE = (os.environ.get("AZURE_BLOB_PUBLIC_BASE") or "").strip()
 
-# === Helper de URL pÃºblica para assets =====================================
+# === Helper de URL pública para assets =====================================
 
 
 def asset_public_url(a):
     """
-    Retorna URL pÃºblica do asset:
+    Retorna URL pública do asset:
     - external_url (se existir)
     - Azure Blob (se AZURE_BLOB_PUBLIC_BASE estiver setado)
     - Rotas locais /uploads/assets/... (file/thumb)
-    - Fallback para sua rota genÃ©rica serve_uploads
+    - Fallback para sua rota genérica serve_uploads
     """
     if not a:
         return None
@@ -445,11 +445,11 @@ def asset_public_url(a):
     # Normaliza chave removendo o prefixo 'uploads/'
     key = rel[8:] if rel.startswith("uploads/") else rel  # ex.: 'assets/xxx.mp4'
 
-    # Azure pÃºblico
+    # Azure público
     if AZURE_BLOB_PUBLIC_BASE:
         return f"{AZURE_BLOB_PUBLIC_BASE.rstrip('/')}/{key.lstrip('/')}"
 
-    # Local â€” preferir rotas especÃ­ficas
+    # Local — preferir rotas específicas
     if key.startswith("assets/thumbs/"):
         fname = key.split("/", 2)[-1]
         return url_for("serve_asset_thumb", filename=fname)
@@ -458,7 +458,7 @@ def asset_public_url(a):
         fname = key.split("/", 1)[-1]
         return url_for("serve_asset_file", filename=fname)
 
-    # Fallback: usa sua rota genÃ©rica existente
+    # Fallback: usa sua rota genérica existente
     return url_for("serve_uploads", filename=rel)
 
 
@@ -466,15 +466,14 @@ def asset_public_url(a):
 app.add_template_global(asset_public_url, name="asset_public_url")
 
 
-app.add_template_global(_public_url, name="public_url")
-# E como context_processor (redundante de propÃ³sito â€” evita ordem de import)
+# E como context_processor (redundante de propósito — evita ordem de import)
 @app.context_processor
 def _inject_asset_helpers():
     return dict(asset_public_url=asset_public_url)
 
 def asset_preview_url(a):
     """
-    Prefere thumbnail; se nÃ£o houver, cai no arquivo principal.
+    Prefere thumbnail; se não houver, cai no arquivo principal.
     Sempre usa _public_url(...) pra gerar SAS quando for blob:...
     """
     if not a:
@@ -484,20 +483,18 @@ def asset_preview_url(a):
 
 def asset_file_url(a):
     """
-    URL do arquivo principal (sem thumbnail), com SAS quando necessÃ¡rio.
+    URL do arquivo principal (sem thumbnail), com SAS quando necessário.
     """
     if not a:
         return None
     return _public_url(getattr(a, "storage_path", None))
 
-# tornar utilizÃ¡veis em qualquer template:
+# tornar utilizáveis em qualquer template:
 app.add_template_global(asset_preview_url, name="asset_preview_url")
-app.add_template_global(_public_url, name="public_url")
 app.add_template_global(asset_file_url,   name="asset_file_url")
 
 
 
-app.add_template_global(_public_url, name="public_url")
 # ------------------ Email ------------------
 SMTP_HOST = os.getenv("SMTP_HOST", os.getenv("SMTP_SERVER", "smtp.office365.com"))
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
@@ -608,8 +605,8 @@ def get_request_ip():
 def save_signature_data_url(data_url: str) -> str:
     """
     Salva o dataURL da assinatura em uploads/signatures/<uuid>.png
-    e jÃ¡ NORMALIZA para traÃ§o preto + fundo transparente.
-    Retorna o caminho relativo pÃºblico (uploads/signatures/arquivo.png).
+    e já NORMALIZA para traço preto + fundo transparente.
+    Retorna o caminho relativo público (uploads/signatures/arquivo.png).
     """
     if not data_url.startswith("data:image"):
         raise ValueError("Invalid signature data URL")
@@ -640,7 +637,7 @@ def save_signature_data_url(data_url: str) -> str:
 
 def save_signature_unified(data_url: str) -> dict:
     """
-    Tenta salvar no Azure Blob. Se indisponÃ­vel, salva local.
+    Tenta salvar no Azure Blob. Se indisponível, salva local.
     Retorna dict:
       { "blob_name": str|None, "local_relpath": str|None }
     """
@@ -781,11 +778,11 @@ def _blob_container_name() -> str:
     return os.environ.get("AZURE_STORAGE_CONTAINER")
 
 def _blob_name_from_rel(rel_path: str) -> str:
-    # MantÃ©m a mesma estrutura de caminho (ex.: 'uploads/assets/abc.png')
+    # Mantém a mesma estrutura de caminho (ex.: 'uploads/assets/abc.png')
     return rel_path.replace("\\", "/").lstrip("/")
 
 def _delete_storage_file(rel_path: str) -> None:
-    """Remove um arquivo do storage (local ou Azure). Ignora silenciosamente se nÃ£o existir."""
+    """Remove um arquivo do storage (local ou Azure). Ignora silenciosamente se não existir."""
     if not rel_path:
         return
     try:
@@ -884,12 +881,12 @@ def _header_pdf(canvas, title: str) -> float:
     canvas.setStrokeColorRGB(0, 0, 0)
     return y_line - 14
 
-# (logo apÃ³s _header_pdf)
+# (logo após _header_pdf)
 
-FOOTER_TEXT = "4UIT Solutions LLC â€¢ 7362 Futures Dr, Bay 15, Orlando, FL 32819 â€¢ https://4uit.us â€¢ contact@4uit.us"
+FOOTER_TEXT = "4UIT Solutions LLC • 7362 Futures Dr, Bay 15, Orlando, FL 32819 • https://4uit.us • contact@4uit.us"
 
 def _footer_pdf(canvas):
-    """Desenha o rodapÃ© padrÃ£o em todas as pÃ¡ginas."""
+    """Desenha o rodapé padrão em todas as páginas."""
     from reportlab.lib.pagesizes import LETTER
     PAGE_W, PAGE_H = LETTER
     MARGIN_L = 72
@@ -914,7 +911,7 @@ def _wrap_lines_kv(canvas, key: str, value: str, y: float, max_width: float, fon
     canvas.setFont(font, size)
 
     prefix = f"{key}: "
-    bullet_txt = "â€¢ " if bullet else ""
+    bullet_txt = "• " if bullet else ""
     k_w = stringWidth(bullet_txt + prefix, font, size)
     words = (value or "").replace("\r\n", "\n").split(" ")
     cur = ""
@@ -943,7 +940,7 @@ def _wrap_lines_kv(canvas, key: str, value: str, y: float, max_width: float, fon
 def _generate_contract_pdf(contract) -> str | None:
     """
     Gera o PDF do contrato e salva em uploads/contracts.
-    Retorna caminho absoluto ou None se indisponÃ­vel.
+    Retorna caminho absoluto ou None se indisponível.
     """
     if not REPORTLAB_AVAILABLE:
         return None
@@ -962,7 +959,7 @@ def _generate_contract_pdf(contract) -> str | None:
     CONTENT_W = PAGE_W - MARGIN_L - MARGIN_R
     LOGO_H = 28
 
-    FOOTER_TEXT = "4UIT Solutions LLC â€¢ 7362 Futures Dr, Bay 15, Orlando, FL 32819 â€¢ https://4uit.us â€¢ contact@4uit.us"
+    FOOTER_TEXT = "4UIT Solutions LLC • 7362 Futures Dr, Bay 15, Orlando, FL 32819 • https://4uit.us • contact@4uit.us"
     logo_path = os.path.join(BASE_DIR, "static", "img", "4uit.png")
 
     def footer(cnv):
@@ -1000,7 +997,7 @@ def _generate_contract_pdf(contract) -> str | None:
         cnv.setStrokeColorRGB(0.7, 0.7, 0.7)
         cnv.line(MARGIN_L, y_line, PAGE_W - MARGIN_R, y_line)
         cnv.setStrokeColorRGB(0, 0, 0)
-        return y_line - 14  # y inicial do conteÃºdo
+        return y_line - 14  # y inicial do conteúdo
 
     def wrap_lines(text: str, font_name: str = "Helvetica", font_size: int = 10):
         out = []
@@ -1020,7 +1017,7 @@ def _generate_contract_pdf(contract) -> str | None:
     abs_path = _contract_pdf_path(contract.id)
     c = rl_canvas.Canvas(abs_path, pagesize=LETTER)
 
-    # PÃ¡gina 1
+    # Página 1
     y = header(c)
 
     # Metadados
@@ -1039,17 +1036,17 @@ def _generate_contract_pdf(contract) -> str | None:
     for line in meta:
         if y - LINE < MARGIN_B:
             footer(c); c.showPage()
-            y = header(c, "4UIT Solutions â€” MSA (cont.)")
+            y = header(c, "4UIT Solutions — MSA (cont.)")
             c.setFont("Helvetica", 10)
         c.drawString(MARGIN_L, y, line)
         y -= LINE
 
-    # TÃ­tulo â€œContract textâ€
+    # Título “Contract text”
     y -= 6
     c.setFont("Helvetica-Bold", 11)
     if y - LINE < MARGIN_B:
         footer(c); c.showPage()
-        y = header(c, "4UIT Solutions â€” MSA (cont.)")
+        y = header(c, "4UIT Solutions — MSA (cont.)")
     c.drawString(MARGIN_L, y, "Contract text:")
     y -= LINE
 
@@ -1058,7 +1055,7 @@ def _generate_contract_pdf(contract) -> str | None:
     for line in wrap_lines(contract.contract_text or ""):
         if y - LINE < MARGIN_B:
             footer(c); c.showPage()
-            y = header(c, "4UIT Solutions â€” MSA (cont.)")
+            y = header(c, "4UIT Solutions — MSA (cont.)")
             c.setFont("Helvetica", 10)
         c.drawString(MARGIN_L, y, line)
         y -= LINE
@@ -1082,7 +1079,7 @@ def _generate_contract_pdf(contract) -> str | None:
     needed = 20 + (meta_lines * LINE) + (sig_h or 110) + 10
     if y - needed < MARGIN_B:
         footer(c); c.showPage()
-        y = header(c, "4UIT Solutions â€” MSA (cont.)")
+        y = header(c, "4UIT Solutions — MSA (cont.)")
 
     c.setFont("Helvetica-Bold", 12)
     c.drawString(MARGIN_L, y, "Signature")
@@ -1112,7 +1109,7 @@ def _generate_contract_pdf(contract) -> str | None:
         except Exception:
             pass
 
-    # RodapÃ© final da Ãºltima pÃ¡gina
+    # Rodapé final da última página
     footer(c)
     c.save()
     return abs_path
@@ -1137,10 +1134,10 @@ def _generate_access_request_pdf(ar: "AccessRequest") -> str:
     LINE = 14
     CONTENT_W = PAGE_W - MARGIN_L - MARGIN_R
 
-    def page_header(title="4UIT Solutions â€” Access Information"):
+    def page_header(title="4UIT Solutions — Access Information"):
         return _header_pdf(c, title)
 
-    def page_break(title="4UIT Solutions â€” Access Information (cont.)"):
+    def page_break(title="4UIT Solutions — Access Information (cont.)"):
         _footer_pdf(c)
         c.showPage()
         return _header_pdf(c, title)
@@ -1162,7 +1159,7 @@ def _generate_access_request_pdf(ar: "AccessRequest") -> str:
 
     y = page_header()
 
-    # ===== CabeÃ§alho de auditoria
+    # ===== Cabeçalho de auditoria
     c.setFont("Helvetica", 10)
     client_name = "-"
     if getattr(ar, "client", None):
@@ -1273,7 +1270,7 @@ def jinja_highlight(text, q):
         return text
 
 
-# Expor helper SAS no Jinja (para thumbnails/visualizaÃ§Ã£o se um dia precisar)
+# Expor helper SAS no Jinja (para thumbnails/visualização se um dia precisar)
 @app.context_processor
 def inject_blob_helpers():
     return {"make_sas_url": make_sas_url if (blob_service and container_client) else lambda *a, **k: ""}
@@ -1296,7 +1293,7 @@ def admin_assets_ensure_tokens():
 def _abs_from_rel_upload(rel_path: str | None) -> str | None:
     """
     Resolve um caminho absoluto a partir de um caminho relativo tipo 'uploads/...'
-    tentando as raÃ­zes conhecidas.
+    tentando as raízes conhecidas.
     """
     if not rel_path:
         return None
@@ -1416,7 +1413,7 @@ def serve_asset_file(filename):
 def serve_asset_thumb(filename):
     return send_from_directory(UPLOAD_ASSETS_THUMBS_DIR, filename, as_attachment=False, max_age=3600)
 
-# (Opcional) genÃ©rica para qualquer coisa em /uploads
+# (Opcional) genérica para qualquer coisa em /uploads
 @app.route("/uploads/<path:path>")
 def serve_asset_generic(path):
     abspath = os.path.join(UPLOAD_ROOT, path)
@@ -1508,7 +1505,7 @@ def api_signature():
     db.session.add(contract)
     db.session.commit()
 
-    # --- cria/garante usuÃ¡rio cliente + link set-password
+    # --- cria/garante usuário cliente + link set-password
     sp_link = None
     try:
         signer_email = (data.get("signer_email") or "").strip().lower()
@@ -1539,7 +1536,7 @@ def api_signature():
     try:
         brand = "4UIT Solutions"
         portal_link = url_for("portal_home", _external=True)
-        subject = f"Your contract with 4UIT â€” signed (#{contract.id})"
+        subject = f"Your contract with 4UIT — signed (#{contract.id})"
 
         text_lines = [
             f"Hi {contract.signer_name},",
@@ -1731,7 +1728,7 @@ def admin_access_pdf(ar_id):
 
 
 # -------------------------------------------------
-# Assets â€” routes (admin)
+# Assets — routes (admin)
 # -------------------------------------------------
 ALLOWED_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "mp4", "mov", "mkv", "pdf"}
 
@@ -1832,7 +1829,7 @@ def assets_list():
     def caret(field: str):
         cur = (request.args.get("sort") or "created_desc")
         if cur.startswith(field + "_"):
-            return "â–²" if cur.endswith("_asc") else "â–¼"
+            return "▲" if cur.endswith("_asc") else "▼"
         return ""
 
     clients = Client.query.order_by(Client.company_name.asc()).all()
@@ -1898,7 +1895,7 @@ def notify_client_asset_needs_review(asset):
       <p>There is a new item waiting for your approval:</p>
       <p><strong>{asset.title or 'Asset'}</strong></p>
       <p><a href="{link}" target="_blank" rel="noopener">Click here to review and approve</a></p>
-      <hr><p style="color:#6b7280">4UIT â€¢ Marketing & Software</p>
+      <hr><p style="color:#6b7280">4UIT • Marketing & Software</p>
     </div>
     """
     return send_mail_4uit(subject, html, to=to, bcc=bcc)
@@ -1917,7 +1914,7 @@ def notify_team_asset_review_feedback(asset, review, action_label: str):
 
     bcc = _env("EMAIL_BCC")
     link = _asset_public_review_link(asset)
-    subject = f"[4UIT] Client {action_label} â€¢ {asset.title or f'#{asset.id}'}"
+    subject = f"[4UIT] Client {action_label} • {asset.title or f'#{asset.id}'}"
     comments = ""
     if review and getattr(review, "comments", None):
         comments = f"<p><strong>Client comments:</strong><br>{review.comments}</p>"
@@ -1929,7 +1926,7 @@ def notify_team_asset_review_feedback(asset, review, action_label: str):
       <p><strong>Asset:</strong> {asset.title or f'#{asset.id}'}</p>
       {comments}
       <p><a href="{link}" target="_blank" rel="noopener">Open asset</a></p>
-      <hr><p style="color:#6b7280">4UIT â€¢ Marketing & Software</p>
+      <hr><p style="color:#6b7280">4UIT • Marketing & Software</p>
     </div>
     """
     return send_mail_4uit(subject, html, to=to, bcc=bcc)
@@ -1988,7 +1985,7 @@ def assets_send_review_email(asset_id: int):
 
     storage_url = _public_url(asset.storage_path) if asset.storage_path else None
 
-    subject = f"[Review] {asset.title} â€” {client.company_name if client else '4UIT Client'}"
+    subject = f"[Review] {asset.title} — {client.company_name if client else '4UIT Client'}"
     brand = "4UIT Solutions"
 
     text_body = f"""Hi,
@@ -2013,7 +2010,7 @@ Thanks,
           <tr>
             <td style="padding:18px 20px;border-bottom:1px solid #1f2937">
               <table width="100%" role="presentation"><tr>
-                <td style="font-weight:700;font-size:18px;color:#fff">4UIT â€¢ Asset Review</td>
+                <td style="font-weight:700;font-size:18px;color:#fff">4UIT • Asset Review</td>
                 <td align="right" style="color:#9ca3af;font-size:12px">{brand}</td>
               </tr></table>
             </td>
@@ -2022,7 +2019,7 @@ Thanks,
             <td style="padding:22px 20px">
               <div style="font-size:16px;color:#e5e7eb;margin-bottom:8px"><strong>{escape(asset.title)}</strong></div>
               <div style="font-size:13px;color:#9ca3af;margin-bottom:16px">
-                {escape(client.company_name) if client else '-'} â€¢ Status: <span style="border:1px solid #374151;border-radius:999px;padding:2px 8px">{escape(asset.status)}</span>
+                {escape(client.company_name) if client else '-'} • Status: <span style="border:1px solid #374151;border-radius:999px;padding:2px 8px">{escape(asset.status)}</span>
               </div>
               {("<div style='margin-bottom:16px'><img src='" + storage_url + "' style='max-width:100%;border-radius:12px;border:1px solid #1f2937'/></div>" if (storage_url and (asset.kind in ('image','copy'))) else "")}
               <div style='margin:18px 0'>
@@ -2095,7 +2092,7 @@ def asset_upload():
             newname = f"{uuid.uuid4().hex}.{ext}"
             rel_main = os.path.join("assets", newname).replace("\\", "/")
 
-            # lÃª em memÃ³ria para suportar Blob e Local
+            # lê em memória para suportar Blob e Local
             raw = f.read()
             file_size = len(raw) if raw is not None else None
             file_mime = f.mimetype or _guess_mime(newname)
@@ -2239,7 +2236,7 @@ def asset_edit(asset_id):
             flash("Client and title are required.", "danger")
             return redirect(url_for("asset_edit", asset_id=a.id))
 
-        # Atualiza campos bÃ¡sicos
+        # Atualiza campos básicos
         a.client_id = client_id
         a.title = title
         a.description = description
@@ -2248,7 +2245,7 @@ def asset_edit(asset_id):
         a.status = status
         a.updated_at = utcnow()
 
-        # SubstituiÃ§Ã£o de arquivo (opcional)
+        # Substituição de arquivo (opcional)
         f = request.files.get("file")
         if f and f.filename:
             ext = (f.filename.rsplit(".", 1)[-1] or "").lower()
@@ -2301,10 +2298,10 @@ def asset_edit(asset_id):
                 thumb_abs = os.path.join(UPLOAD_ASSETS_THUMBS_DIR, thumb_name)
 
                 if _storage_is_azure():
-                    # baixa temporÃ¡rio, gera thumb e reenvia
+                    # baixa temporário, gera thumb e reenvia
                     tmp_abs = storage_abs if not _storage_is_azure() else os.path.join(BASE_DIR, "tmp_" + newname)
                     if _storage_is_azure():
-                        # baixa o blob recÃ©m enviado para gerar thumb
+                        # baixa o blob recém enviado para gerar thumb
                         bsc = _azure_blob_client()
                         container = _blob_container_name()
                         blob_name = _blob_name_from_rel(storage_rel)
@@ -2322,7 +2319,7 @@ def asset_edit(asset_id):
                         overwrite=True,
                         content_settings=ContentSettings(content_type="image/jpeg"),
                     )
-                    # limpa temporÃ¡rios locais se quiser
+                    # limpa temporários locais se quiser
                     try:
                         if _storage_is_azure() and os.path.exists(tmp_abs):
                             os.remove(tmp_abs)
@@ -2366,7 +2363,7 @@ def asset_delete(asset_id):
 
 
 # -------------------------------------------------
-# Clients â€” CRUD (admin)
+# Clients — CRUD (admin)
 # -------------------------------------------------
 @app.get("/clients")
 @admin_required
@@ -2409,7 +2406,7 @@ def clients_list():
         return url_for("clients_list") + qs(sort=next_sort)
 
     def caret():
-        return "â–²" if sort == "name_asc" else "â–¼"
+        return "▲" if sort == "name_asc" else "▼"
 
     return render_template(
         "clients_list.html",
@@ -2487,10 +2484,10 @@ def clients_delete(client_id: int):
             if sum(deps.values()) > 0:
                 db.session.rollback()
                 flash(
-                    f"NÃ£o foi possÃ­vel excluir '{c.company_name}'. "
+                    f"Não foi possível excluir '{c.company_name}'. "
                     f"Existem {deps['contracts']} contrato(s), {deps['assets']} asset(s) "
                     f"e {deps['access']} access request(s) vinculados. "
-                    f"Remova/mova primeiro ou use a opÃ§Ã£o de exclusÃ£o forÃ§ada.",
+                    f"Remova/mova primeiro ou use a opção de exclusão forçada.",
                     "danger"
                 )
                 return redirect(url_for("clients_list"))
@@ -2502,7 +2499,7 @@ def clients_delete(client_id: int):
 
         db.session.delete(c)
         db.session.commit()
-        flash("Cliente excluÃ­do.", "warning")
+        flash("Cliente excluído.", "warning")
     except Exception as e:
         db.session.rollback()
         flash(f"Erro ao excluir: {e}", "danger")
@@ -2560,7 +2557,7 @@ def admin_home():
 
 
 # ---------------------------------------------
-# Admin â€” Contracts (view / pdf)
+# Admin — Contracts (view / pdf)
 # ---------------------------------------------
 
 @app.route("/admin/contracts/<int:contract_id>")
@@ -2610,7 +2607,7 @@ def admin_contract_pdf(contract_id: int):
 @app.get("/uploads/signatures/<path:filename>")
 def get_signature(filename):
     """
-    Serve assinaturas procurando em mÃºltiplas raÃ­zes:
+    Serve assinaturas procurando em múltiplas raízes:
     - UPLOAD_SIGS_DIR (persistente)
     - BASE_DIR/uploads/signatures (legado)
     - BASE_DIR/uploads (se o caminho veio completo "uploads/signatures/...")
@@ -2624,18 +2621,18 @@ def get_signature(filename):
     legacy_dir = os.path.join(BASE_DIR, "uploads", "signatures")
     candidates.append(os.path.join(legacy_dir, filename))
 
-    # 3) Caso o filename jÃ¡ venha com "uploads/signatures/..."
+    # 3) Caso o filename já venha com "uploads/signatures/..."
     if filename.startswith("uploads/"):
         candidates.append(os.path.join(BASE_DIR, filename))
-        # e tambÃ©m tentar relativo Ã  raiz persistente
+        # e também tentar relativo à raiz persistente
         candidates.append(os.path.join(UPLOAD_ROOT, filename.replace("uploads/", "")))
 
     for cand in candidates:
         if os.path.isfile(cand):
-            # devolver do diretÃ³rio em que achamos
+            # devolver do diretório em que achamos
             return send_file(cand)
 
-    # nÃ£o achou: 404
+    # não achou: 404
     abort(404)
 
 
@@ -2859,7 +2856,7 @@ def client_contract_pref(client_id: int):
         if to:
             brand = "4UIT Solutions"
             contract_url, access_url = _build_onboarding_links(c, external=True)
-            subject = f"{c.company_name or 'Client'} â€” Please review and e-sign your 4UIT agreement"
+            subject = f"{c.company_name or 'Client'} — Please review and e-sign your 4UIT agreement"
 
             text_body = f"""Hello,
 
@@ -2913,7 +2910,7 @@ Thank you,
     )
 
 
-# --- Helpers de vÃ­nculo cliente-usuÃ¡rio ---
+# --- Helpers de vínculo cliente-usuário ---
 def _client_for_user(user: User):
     if not user or not user.is_authenticated:
         return None
@@ -2921,7 +2918,7 @@ def _client_for_user(user: User):
 
 
 # ================
-# Portal â€” CONTRATOS
+# Portal — CONTRATOS
 # ================
 @app.get("/portal/contracts")
 @login_required
@@ -2945,7 +2942,7 @@ def portal_contracts():
 
         access_last = access_rows[-1] if access_rows else None
 
-    # destino do botÃ£o "Fill my access info" -> rota existente do portal
+    # destino do botão "Fill my access info" -> rota existente do portal
     access_prefill = url_for("portal_access")
 
     return render_template(
@@ -2965,7 +2962,7 @@ def portal_contract_pdf(contract_id):
     contract = Contract.query.get_or_404(contract_id)
     client = Client.query.get_or_404(contract.client_id)
 
-    # autorizaÃ§Ã£o bÃ¡sica: o usuÃ¡rio do portal precisa pertencer a este client
+    # autorização básica: o usuário do portal precisa pertencer a este client
     my_client = _portal_find_client_for_user()
     if not my_client or my_client.id != client.id:
         abort(403)
@@ -2983,26 +2980,26 @@ def portal_contract_pdf(contract_id):
 
 
 # ======================
-# Portal â€” ACCESS REQUESTS
+# Portal — ACCESS REQUESTS
 # ======================
 @app.get("/portal/access")
 @login_required
 def portal_access():
-    # encontrar o client do usuÃ¡rio logado
+    # encontrar o client do usuário logado
     client = _portal_find_client_for_user()
     if not client:
         flash("We couldn't link your user to a client. Please contact support.", "warning")
         return redirect(url_for("portal_contracts"))
 
-    # (opcional) Ãºltimos envios sÃ³ para contexto, caso seu template use
+    # (opcional) últimos envios só para contexto, caso seu template use
     access_rows = (AccessRequest.query
                    .filter_by(client_id=client.id)
                    .order_by(AccessRequest.submitted_at.desc())
                    .all())
     access_last = access_rows[0] if access_rows else None
 
-    # renderiza o MESMO template jÃ¡ usado na rota pÃºblica
-    # mantendo as mesmas variÃ¡veis esperadas pelo access_request.html
+    # renderiza o MESMO template já usado na rota pública
+    # mantendo as mesmas variáveis esperadas pelo access_request.html
     return render_template(
         "access_request.html",
         prefill_company=(client.company_name or ""),
@@ -3016,7 +3013,7 @@ def portal_access():
 @app.route("/portal/access/<int:access_id>/pdf")
 @login_required
 def portal_access_pdf(access_id):
-    # autorizaÃ§Ã£o: usuÃ¡rio logado precisa pertencer ao mesmo Client do AccessRequest
+    # autorização: usuário logado precisa pertencer ao mesmo Client do AccessRequest
     ar = AccessRequest.query.get_or_404(access_id)
     my_client = _portal_find_client_for_user()
     if not my_client or my_client.id != ar.client_id:
@@ -3037,7 +3034,7 @@ def portal_access_pdf(access_id):
 
 
 # ======================
-# Portal â€” Asset Review (Ãºnica definiÃ§Ã£o)
+# Portal — Asset Review (única definição)
 # ======================
 def _resolve_user_client_id():
     cid = getattr(current_user, "client_id", None)
@@ -3164,4 +3161,3 @@ def portal_asset_review_submit(asset_id: int):
 # -------------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True)
-

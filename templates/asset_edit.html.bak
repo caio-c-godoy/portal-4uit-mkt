@@ -1,5 +1,5 @@
-﻿{% extends "base.html" %}
-{% set title = "Edit Asset â€” 4UIT" %}
+{% extends "base.html" %}
+{% set title = "Edit Asset — 4UIT" %}
 {% set heading = "Edit asset" %}
 {% set subheading = a.title %}
 
@@ -53,9 +53,9 @@
       <div class="muted" style="margin-bottom:6px">Current file</div>
       {% if a.storage_path %}
         <div style="display:flex; gap:10px; align-items:center">
-          <a class="btn btn-ghost" href="{{ public_url(a.storage_path) }}" target="_blank" rel="noopener">Open current file</a>
+          <a class="btn btn-ghost" href="/{{ a.storage_path }}" target="_blank" rel="noopener">Open current file</a>
           {% if a.thumbnail_path %}
-            <img src="{{ public_url(a.thumbnail_path) }}" alt="" style="height:40px;border:1px solid var(--ff-border);border-radius:6px">
+            <img src="/{{ a.thumbnail_path }}" alt="" style="height:40px;border:1px solid var(--ff-border);border-radius:6px">
           {% endif %}
         </div>
       {% else %}
@@ -76,4 +76,3 @@
   </form>
 </div>
 {% endblock %}
-

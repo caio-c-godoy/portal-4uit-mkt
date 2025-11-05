@@ -2935,6 +2935,44 @@ def portal_asset_review_submit(asset_id: int):
     flash("Feedback submitted. Thank you!", "success")
     return redirect(url_for("portal_asset_review", asset_id=asset.id))
 
+
+#===========Mini self-test=============
+
+@app.get("/admin/debug/asset-urls")
+@admin_required
+def debug_asset_urls():
+    rows = []
+    from os import environ as ENV
+    rows.append({
+        "AZURE_STORAGE_ACCOUNT": ENV.get("AZURE_STORAGE_ACCOUNT"),
+        "AZURE_BLOB_CONTAINER": ENV.get("AZURE_BLOB_CONTAINER"),
+        "AZURE_BLOB_PUBLIC_BASE": ENV.get("AZURE_BLOB_PUBLIC_BASE"),
+        "USE_BLOB_in_code": bool(blob_service and container_client),
+    })
+
+    items = Asset.query.order_by(Asset.id.asc()).all()
+    for a in items:
+        sp = (a.storage_path or "").replace("\\", "/")
+        tp = (a.thumbnail_path or "").replace("\\", "/")
+        rows.append({
+            "id": a.id,
+            "title": a.title,
+            "storage_path": sp,
+            "thumbnail_path": tp,
+            "is_blob_storage_path": sp.startswith("blob:") or tp.startswith("blob:"),
+            "public_url(storage)": _public_url(a.storage_path),
+            "public_url(thumb)": _public_url(a.thumbnail_path),
+            "asset_public_url()": asset_public_url(a),
+            "asset_file_url()": asset_file_url(a),
+            "reason_if_missing": (
+                "SAS not available (blob paths + USE_BLOB=False)"
+                if ((sp.startswith("blob:") or tp.startswith("blob:")) and not (blob_service and container_client))
+                else ("no paths on record" if not sp and not tp else "")
+            ),
+        })
+    return jsonify(rows)
+
+
 # -------------------------------------------------
 # Main
 # -------------------------------------------------

@@ -461,13 +461,39 @@ def asset_public_url(a):
     # Fallback: usa sua rota genérica existente
     return url_for("serve_uploads", filename=rel)
 
+
 # Registra nos globais do Jinja (garante disponibilidade)
 app.add_template_global(asset_public_url, name="asset_public_url")
+
 
 # E como context_processor (redundante de propósito — evita ordem de import)
 @app.context_processor
 def _inject_asset_helpers():
     return dict(asset_public_url=asset_public_url)
+
+def asset_preview_url(a):
+    """
+    Prefere thumbnail; se não houver, cai no arquivo principal.
+    Sempre usa _public_url(...) pra gerar SAS quando for blob:...
+    """
+    if not a:
+        return None
+    return (_public_url(getattr(a, "thumbnail_path", None))
+            or _public_url(getattr(a, "storage_path", None)))
+
+def asset_file_url(a):
+    """
+    URL do arquivo principal (sem thumbnail), com SAS quando necessário.
+    """
+    if not a:
+        return None
+    return _public_url(getattr(a, "storage_path", None))
+
+# tornar utilizáveis em qualquer template:
+app.add_template_global(asset_preview_url, name="asset_preview_url")
+app.add_template_global(asset_file_url,   name="asset_file_url")
+
+
 
 # ------------------ Email ------------------
 SMTP_HOST = os.getenv("SMTP_HOST", os.getenv("SMTP_SERVER", "smtp.office365.com"))

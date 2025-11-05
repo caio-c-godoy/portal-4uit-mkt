@@ -1957,7 +1957,7 @@ def assets_send_review_email(asset_id: int):
         db.session.commit()
     review_url = url_for("public_review", token=asset.public_token, _external=True)
 
-    storage_url = f"{request.host_url.rstrip('/')}/{asset.storage_path}" if asset.storage_path else None
+    storage_url = _public_url(asset.storage_path) if asset.storage_path else None
 
     subject = f"[Review] {asset.title} — {client.company_name if client else '4UIT Client'}"
     brand = "4UIT Solutions"
@@ -2737,7 +2737,7 @@ def portal_asset_detail(asset_id: int):
         ensure_public_token(a)
         db.session.commit()
     review_url = f"{request.host_url.rstrip('/')}/review/{a.public_token}"
-    preview_url = f"/{a.thumbnail_path or a.storage_path}" if (a.thumbnail_path or a.storage_path) else None
+    preview_url = _public_url(a.thumbnail_path) or _public_url(a.storage_path)
     return render_template("portal_asset_detail.html", a=a, review_url=review_url, preview_url=preview_url)
 
 
@@ -3058,10 +3058,8 @@ def portal_asset_review(asset_id: int):
         return redirect(url_for("portal_assets"))
 
     preview_url = None
-    if getattr(asset, "thumbnail_path", None):
-        preview_url = f"/{asset.thumbnail_path}"
-    elif getattr(asset, "storage_path", None):
-        preview_url = f"/{asset.storage_path}"
+    preview_url = _public_url(asset.thumbnail_path) or _public_url(asset.storage_path)
+
 
     reviews = (AssetReview.query
                .filter_by(asset_id=asset.id, client_id=client.id)

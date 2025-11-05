@@ -10,7 +10,7 @@
     <select class="ff-input" name="template_id">
       <option value="">(none)</option>
       {% for t in templates %}
-      <option value="{{ t.id }}" {% if pref and pref.template_id==t.id %}selected{% endif %}>{{ t.name }}</option>
+      <option value="{{ t.id }}" {% if pref and pref.template_id=t.id %}selected{% endif %}>{{ t.name }}</option>
       {% endfor %}
     </select>
 

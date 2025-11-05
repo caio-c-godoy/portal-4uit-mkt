@@ -1,5 +1,5 @@
 ﻿{% extends "portal_base.html" %}
-{% block title %}Portal do Cliente â€” Detalhe da Arte{% endblock %}
+{% block title %}Client Portal &mdash; Asset Detail{% endblock %}
 
 {% block extra_head %}
 <style>
@@ -39,8 +39,8 @@
 </style>
 {% endblock %}
 
-{% set heading = "Detalhe da Arte" %}
-{% set subheading = "Visualize e aprove/reprove com comentÃ¡rio." %}
+{% set heading = "Asset Detail" %}
+{% set subheading = "View and approve/reject with a comment." %}
 
 {% block content %}
 <div class="wrap">
@@ -67,14 +67,14 @@
 
     <div class="small" style="margin-top:8px">
       ID #{{ a.id }}
-      â€¢ Criado: {{ a.created_at.strftime('%Y-%m-%d %H:%M') if a.created_at else '-' }}
-      {% if a.scheduled_for %} â€¢ Agendado (UTC): {{ a.scheduled_for.isoformat() }}{% endif %}
+      &bull; Created: {{ a.created_at.strftime('%Y-%m-%d %H:%M') if a.created_at else '&mdash;' }}
+      {% if a.scheduled_for %} &bull; Scheduled (UTC): {{ a.scheduled_for.isoformat() }}{% endif %}
     </div>
 
     <div class="row" style="margin-top:14px; gap:8px">
-      <a class="btn" href="{{ review_url }}" target="_blank">Abrir PÃ¡gina de RevisÃ£o</a>
+      <a class="btn" href="{{ review_url }}" target="_blank" rel="noopener">Open Review Page</a>
       {% if a.storage_path %}
-        <a class="btn secondary" href="{{ public_url(a.storage_path) }}" target="_blank">Abrir Arquivo</a>
+        <a class="btn secondary" href="{{ public_url(a.storage_path) }}" target="_blank" rel="noopener">Open File</a>
       {% endif %}
     </div>
   </section>
@@ -82,22 +82,20 @@
   <aside class="panel">
     <form class="stack" method="post" action="{{ review_url }}/decision">
       <div class="row">
-        <button class="btn" name="decision" value="approve" type="submit">Aprovar</button>
-        <button class="btn secondary" name="decision" value="reject" type="submit">Reprovar</button>
+        <button class="btn" name="decision" value="approve" type="submit">Approve</button>
+        <button class="btn secondary" name="decision" value="reject" type="submit">Reject</button>
       </div>
 
-      <label class="small">ComentÃ¡rio (opcional)</label>
-      <textarea name="comment" placeholder="Deixe um comentÃ¡rio para nossa equipe..."></textarea>
+      <label class="small">Comment (optional)</label>
+      <textarea name="comment" placeholder="Leave a note for our team..."></textarea>
 
-      <label class="small">Agendar publicaÃ§Ã£o (opcional, UTC)</label>
+      <label class="small">Schedule publication (optional, UTC)</label>
       <input type="datetime-local" name="scheduled_for"/>
 
       <div class="small">
-        Dica: vocÃª tambÃ©m pode abrir a <a href="{{ review_url }}" target="_blank">PÃ¡gina de RevisÃ£o</a>
-        e enviar sua decisÃ£o por lÃ¡.
+        Tip: You can also open the <a href="{{ review_url }}" target="_blank" rel="noopener">Review Page</a> and submit your decision there.
       </div>
     </form>
   </aside>
 </div>
 {% endblock %}
-

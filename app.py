@@ -406,6 +406,14 @@ app.add_template_global(asset_public_url, name="asset_public_url")
 app.add_template_global(_public_url, name="public_url")
 
 @app.context_processor
+def inject_helpers():
+    return dict(
+        asset_public_url=asset_public_url,
+        asset_preview_url=asset_preview_url,
+        asset_file_url=asset_file_url,
+    )
+
+@app.context_processor
 def _inject_asset_helpers():
     return dict(asset_public_url=asset_public_url)
 

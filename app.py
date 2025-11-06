@@ -142,28 +142,37 @@ def make_sas_url(blob_name: str, minutes: int = 15) -> str:
 
 def _public_url(ref: str | None, minutes: int = 30) -> str | None:
     """
-    Convert stored ref to a browser-consumable URL:
-      - 'blob:...'   -> generates temporary SAS URL
-      - 'uploads/...' -> returns '/uploads/...'
-      - 'assets/...' -> returns '/uploads/assets/...'
-      - any other    -> returns '/<ref>'
+    Converte o 'ref' salvo em uma URL consumível no browser:
+      - 'blob:...'  -> tenta SAS; se falhar, usa proxy interno /blob/<blob_name>
+      - 'uploads/...' -> '/uploads/...'
+      - 'assets/...'  -> '/uploads/assets/...'
+      - qualquer outra -> '/' + ref
     """
     if not ref:
         return None
     ref = ref.replace("\\", "/").lstrip("/")
+
     if ref.startswith("blob:"):
-        if not USE_BLOB:
-            return None
         blob_name = ref.split("blob:", 1)[1]
+        # Se não estivermos com Blob ativo, não há como resolver
+        if not (blob_service and container_client):
+            return None
+        # 1) tenta SAS
         try:
             return make_sas_url(blob_name, minutes=minutes)
         except Exception:
-            return None
+            # 2) fallback: proxy interno lendo direto do Blob
+            try:
+                return url_for("blob_proxy", blob_name=blob_name)
+            except Exception:
+                return None
+
     if ref.startswith("uploads/"):
         return "/" + ref
     if ref.startswith("assets/"):
         return "/uploads/" + ref
     return "/" + ref
+
 
 # -------------------------------------------------
 # PDF helpers (ReportLab small blocks)
@@ -1298,6 +1307,38 @@ def serve_uploads(path):
     if not os.path.exists(abspath):
         abort(404)
     return send_from_directory(directory, fname, as_attachment=False, max_age=3600)
+
+
+@app.get("/blob/<path:blob_name>")
+def blob_proxy(blob_name: str):
+    """
+    Fallback seguro para exibir arquivos do Azure Blob quando não conseguimos gerar SAS.
+    Lê do container com as credenciais do servidor e faz streaming para o cliente.
+    """
+    if not (blob_service and container_client):
+        abort(404)
+
+    try:
+        bc = container_client.get_blob_client(blob_name)
+        props = bc.get_blob_properties()
+        ctype = (getattr(getattr(props, "content_settings", None), "content_type", None)
+                 or mimetypes.guess_type(blob_name)[0]
+                 or "application/octet-stream")
+
+        stream = bc.download_blob()
+        data = stream.readall()
+
+        resp = make_response(data)
+        resp.headers["Content-Type"] = ctype
+        # Cache leve para evitar hits repetidos
+        resp.headers["Cache-Control"] = "public, max-age=900"  # 15 min
+        # Sugestão de nome
+        resp.headers["Content-Disposition"] = f'inline; filename="{os.path.basename(blob_name)}"'
+        return resp
+    except Exception as e:
+        current_app.logger.warning("blob_proxy error for %s: %s", blob_name, e)
+        abort(404)
+
 
 # -------------------------------------------------
 # Small APIs

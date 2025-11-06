@@ -383,11 +383,11 @@ AZURE_BLOB_PUBLIC_BASE = (os.environ.get("AZURE_BLOB_PUBLIC_BASE") or "").strip(
 # === Public URL helper for assets ===
 def asset_public_url(a):
     """
-    Return a public URL for an Asset instance:
-    - external_url (if provided)
-    - Azure Blob (if AZURE_BLOB_PUBLIC_BASE is set)
-    - Local routes /uploads/assets/... (file/thumb)
-    - Fallback to generic /uploads route
+    URL pública preferindo:
+    1) external_url (se existir)
+    2) thumbnail_path via _public_url (gera SAS p/ blob quando aplicável)
+    3) storage_path via _public_url
+    Retorna None se não houver nada.
     """
     if not a:
         return None
@@ -396,24 +396,12 @@ def asset_public_url(a):
     if ext_url:
         return ext_url
 
-    rel = (getattr(a, "storage_path", "") or "").replace("\\", "/")
-    if not rel:
-        return None
+    # Usa o pipeline central (_public_url) que já trata:
+    # - 'blob:...' => SAS temporário
+    # - 'uploads/...'/ 'assets/...' => rota local /uploads/...
+    return (_public_url(getattr(a, "thumbnail_path", None))
+            or _public_url(getattr(a, "storage_path", None)))
 
-    key = rel[8:] if rel.startswith("uploads/") else rel  # e.g., 'assets/xxx.mp4'
-
-    if AZURE_BLOB_PUBLIC_BASE:
-        return f"{AZURE_BLOB_PUBLIC_BASE.rstrip('/')}/{key.lstrip('/')}"
-
-    if key.startswith("assets/thumbs/"):
-        fname = key.split("/", 2)[-1]
-        return url_for("serve_asset_thumb", filename=fname)
-
-    if key.startswith("assets/"):
-        fname = key.split("/", 1)[-1]
-        return url_for("serve_asset_file", filename=fname)
-
-    return url_for("serve_uploads", filename=rel)
 
 # Make helpers available in Jinja
 app.add_template_global(asset_public_url, name="asset_public_url")
@@ -425,11 +413,9 @@ def inject_helpers():
         asset_public_url=asset_public_url,
         asset_preview_url=asset_preview_url,
         asset_file_url=asset_file_url,
+        make_sas_url=(make_sas_url if (blob_service and container_client) else (lambda *a, **k: "")),
     )
 
-@app.context_processor
-def _inject_asset_helpers():
-    return dict(asset_public_url=asset_public_url)
 
 def asset_preview_url(a):
     """Prefer thumbnail; otherwise return the main file URL (both via _public_url for SAS, if needed)."""
@@ -439,7 +425,6 @@ def asset_preview_url(a):
             or _public_url(getattr(a, "storage_path", None)))
 
 def asset_file_url(a):
-    """Main file URL only (no thumbnail)."""
     if not a:
         return None
     return _public_url(getattr(a, "storage_path", None))
@@ -1179,10 +1164,7 @@ def jinja_highlight(text, q):
     except Exception:
         return text
 
-# Expose SAS helper in Jinja (if ever needed)
-@app.context_processor
-def inject_blob_helpers():
-    return {"make_sas_url": make_sas_url if (blob_service and container_client) else lambda *a, **k: ""}
+
 
 # -------------------------------------------------
 # Small admin util
@@ -2486,12 +2468,14 @@ def public_review_decision(token):
             scheduled_dt = None
 
     if decision == "reject" and not comment:
-        storage_url = f"/{asset.storage_path}" if asset.storage_path else None
+        storage_url = _public_url(asset.storage_path)
+        thumb_url = _public_url(asset.thumbnail_path)
         return render_template(
             "public_review.html",
             asset=asset,
             token=token,
             storage_url=storage_url,
+            thumb_url=thumb_url,
             external_url=asset.external_url,
             error="Please add a comment to explain the rejection."
         ), 400

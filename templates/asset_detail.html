@@ -1,11 +1,11 @@
 ﻿{% extends "base.html" %}
-{% set title = "Asset Detail â€” 4UIT" %}
+{% set title = "Asset Detail — 4UIT" %}
 {% set heading = "Asset detail" %}
 {% set subheading = a.title %}
 
 {% block content %}
-{# Gera URL pÃºblica (local ou Azure) para o preview #}
-{% set preview_url = public_url(a.thumbnail_path) or public_url(a.storage_path) %}
+{# Public URL for preview (thumb if available, else main file) #}
+{% set preview_url = asset_preview_url(a) %}
 
 <div class="card">
   <div class="grid" style="grid-template-columns:1fr 1fr;gap:12px">
@@ -23,7 +23,9 @@
 
       {% if a.external_url %}
       <div class="muted" style="margin-top:8px">External</div>
-      <div><a class="link" href="{{ a.external_url }}" target="_blank" rel="noopener">{{ a.external_url }}</a></div>
+      <div>
+        <a class="link" href="{{ a.external_url }}" target="_blank" rel="noopener">{{ a.external_url }}</a>
+      </div>
       {% endif %}
 
       <div class="muted" style="margin-top:8px">Review link</div>
@@ -36,7 +38,8 @@
       <div class="muted">Preview</div>
       {% if preview_url %}
         {% if a.kind in ('image','copy') %}
-          <img src="{{ preview_url }}" alt="" style="max-width:100%;border:1px solid var(--ff-border);border-radius:12px"/>
+          <img src="{{ preview_url }}" alt="Asset preview"
+               style="max-width:100%;border:1px solid var(--ff-border);border-radius:12px" />
         {% else %}
           <a class="btn" href="{{ preview_url }}" target="_blank" rel="noopener">Open file</a>
         {% endif %}
@@ -49,13 +52,15 @@
 
 <div class="card" style="margin-top:12px; display:flex; gap:8px; align-items:center; justify-content:flex-end">
   <a class="btn" href="{{ url_for('asset_edit', asset_id=a.id) }}">Edit</a>
-  <form method="post" action="{{ url_for('asset_delete', asset_id=a.id) }}" onsubmit="return confirm('Delete this asset? This cannot be undone.');">
+  <form method="post" action="{{ url_for('asset_delete', asset_id=a.id) }}"
+        onsubmit="return confirm('Delete this asset? This cannot be undone.');">
     <button class="btn btn-danger" type="submit">Delete</button>
   </form>
 </div>
 
 <div class="card" style="margin-top:12px">
-  <form method="post" action="{{ url_for('assets_send_review_email', asset_id=a.id) }}" class="grid" style="grid-template-columns:1fr 1fr 140px; gap:8px; align-items:end">
+  <form method="post" action="{{ url_for('assets_send_review_email', asset_id=a.id) }}"
+        class="grid" style="grid-template-columns:1fr 1fr 140px; gap:8px; align-items:end">
     <div>
       <label class="ff-label">To</label>
       <input class="ff-input" name="to" type="email" value="{{ default_to }}">
@@ -77,4 +82,3 @@
   </form>
 </div>
 {% endblock %}
-

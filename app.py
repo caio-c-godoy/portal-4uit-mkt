@@ -238,6 +238,20 @@ os.makedirs(app.instance_path, exist_ok=True)
 
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "dev")
 
+import logging, sys
+
+# Envia logs do Flask para stdout/stderr do container
+gunicorn_error_logger = logging.getLogger('gunicorn.error')
+app.logger.handlers = gunicorn_error_logger.handlers
+app.logger.setLevel(logging.DEBUG)
+
+# (opcional) um handler direto p/ stdout, caso não exista
+if not app.logger.handlers:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.DEBUG)
+    app.logger.addHandler(handler)
+
+
 # DATABASE — prefer Postgres from .env; else SQLite in instance/
 db_url = (os.getenv("DATABASE_URL") or "").strip()
 # fix old "postgres://" URIs

@@ -70,7 +70,7 @@
           <td>{{ x.created_at.isoformat() if x.created_at else '-' }}</td>
           <td style="white-space:nowrap">
             {% if x.public_token %}
-              <input value="{{ review_base }}{{ x.public_token }}" style="width:240px" readonly>
+              <input value="{{ review_base }}{{ x.public_token }}" style="width:240px" readonly />
               <button class="btn" type="button" onclick="navigator.clipboard.writeText(this.previousElementSibling.value)">Copy</button>
             {% else %}
               <span class="muted">no token</span>
@@ -83,10 +83,16 @@
               <button class="btn btn-danger" type="submit">Delete</button>
             </form>
 
-            {# Prefer helpers that work on local, SAS, or public base; try preview -> file -> public base #}
+            {# URLs seguras para preview/arquivo; se asset_public_url não existir, ignora #}
             {% set preview_url = asset_preview_url(x) %}
             {% set file_url = asset_file_url(x) %}
-            {% set open_url = preview_url or file_url or asset_public_url(x) %}
+            {% if asset_public_url is defined %}
+              {% set public_url_safe = asset_public_url(x) %}
+            {% else %}
+              {% set public_url_safe = None %}
+            {% endif %}
+            {% set open_url = preview_url or file_url or public_url_safe %}
+
             {% if open_url %}
               <a class="btn btn-ghost" href="{{ open_url }}" target="_blank" rel="noopener">Open file</a>
             {% endif %}
